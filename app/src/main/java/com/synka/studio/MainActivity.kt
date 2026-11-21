@@ -279,7 +279,7 @@ private fun SynkaAppShell(engine: SynkaEngine) {
     val isAudioLoaded = engine.audioUri != null || (engine.visualUri != null && engine.visualIsVideo)
     val isPresetSheetShowingVisual = activePresetSheet != null && activePresetSheet?.domain != PresetDomain.AUDIO
 
-    // Blur Home backdrop safely on API 33+ while ModalBottomSheet is open
+    // Blur backdrop safely on API 33+ while ModalBottomSheet is open
     val backdropBlurRadius by animateDpAsState(
         targetValue = if (activePresetSheet != null) 10.dp else 0.dp,
         animationSpec = tween(durationMillis = 180),
@@ -350,18 +350,30 @@ private fun SynkaAppShell(engine: SynkaEngine) {
                         )
                     }
                     SynkaTab.DISPLAY_EQ -> {
-                        PlaceholderWorkspaceBox(
-                            title = "Display EQ (Arka Studio)",
-                            subtitle = "Placeholder for Chunks 9–10 • 8-Channel HSL, 5-Zone Tone EQ, Dual Globes, and Subzero Dimmer.",
-                            statusLine = "Master: ${if (engine.isMasterEnabled) "ON" else "OFF"} • Active Preset: ${engine.findPresetById(engine.activePresetId)?.name ?: "Custom"}",
-                            actionLabel = "Back to Home",
-                            onAction = { activeTab = SynkaTab.HOME }
+                        ArkaStudio(
+                            engine = engine,
+                            activeDisplayGenre = activeDisplayGenre,
+                            isPreviewActive = !isPresetSheetShowingVisual,
+                            onEditVisualMedia = {
+                                visualMediaPicker.launch(arrayOf("image/*", "video/*"))
+                            },
+                            onResetToKora = {
+                                engine.resetToKora()
+                                activeDisplayGenre = null
+                                activeAudioGenre = null
+                            },
+                            onPresetSaved = { saved ->
+                                saved.displayGenre?.let { genre ->
+                                    activeDisplayGenre = genre
+                                    lastUsedPresetByGenre["${PresetDomain.DISPLAY.name}:${genre.name}"] = saved.id
+                                }
+                            }
                         )
                     }
                     SynkaTab.AUDIO_EQ -> {
                         PlaceholderWorkspaceBox(
                             title = "Audio EQ (Svara Studio)",
-                            subtitle = "Placeholder for Chunks 10–11 • 10-Band Parametric EQ, 5-Zone Sound Contour, Dual Globes, and Anti-Crackle Limiter.",
+                            subtitle = "Placeholder for Chunk 11 • 10-Band Parametric EQ, 5-Zone Sound Contour, Dual Globes, and Anti-Crackle Limiter.",
                             statusLine = "DSP: ${engine.svaraAudio.activeSampleRate} Hz • ${engine.svaraAudio.activeEncodingLabel()} • Pre ${String.format(java.util.Locale.US, "%+.1f", engine.activeSvara.preAmpDb)} dB",
                             actionLabel = "Back to Home",
                             onAction = { activeTab = SynkaTab.HOME }
@@ -391,7 +403,7 @@ private fun SynkaAppShell(engine: SynkaEngine) {
             )
         }
 
-        // Chunk 8: Material3 ModalBottomSheet PresetSheet
+        // Material3 ModalBottomSheet PresetSheet
         activePresetSheet?.let { sheetModel ->
             PresetSheet(
                 engine = engine,
@@ -722,7 +734,7 @@ private fun PersistentBottomDock(
 }
 
 // -----------------------------------------------------------------------------
-// Placeholder Boxes for Chunks 9–13
+// Placeholder Boxes for Chunks 11–13
 // -----------------------------------------------------------------------------
 
 @Composable
@@ -814,7 +826,7 @@ private fun LocalMediaPlaceholderBox(
                 color = colors.primaryText
             )
             Text(
-                text = "Placeholder for Chunk 11 • Media Library & Per-File Preset Bindings. Use the quick pickers below to test live Home preview and the persistent Mini-Player now.",
+                text = "Placeholder for Chunk 12 • Media Library & Per-File Preset Bindings. Use the quick pickers below to test live preview and the persistent Mini-Player now.",
                 style = MaterialTheme.typography.bodySmall,
                 color = colors.secondaryText
             )
@@ -1031,7 +1043,7 @@ private fun StudioDrawerOverlay(
                     .background(SynkaPalette.SindoorCrimson.copy(alpha = 0.16f))
                     .border(1.dp, SynkaPalette.SindoorCrimson.copy(alpha = 0.5f), RoundedCornerShape(10.dp))
                     .clickable {
-                        throw RuntimeException("Synka Test Gate 8: Simulated uncaught exception")
+                        throw RuntimeException("Synka Test Gate 10: Simulated uncaught exception")
                     }
                     .padding(horizontal = 12.dp, vertical = 9.dp),
                 contentAlignment = Alignment.Center
