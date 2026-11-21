@@ -1,4 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">Synka Studio</string>
+
+    <!-- Step 1: Display EQ Accessibility Overlay Strings -->
+    <string name="synka_display_a11y_label">Synka Studio Visual Comfort Overlay</string>
+    <string name="synka_display_a11y_description">Optional trusted full-screen overlay allowing Synka Studio to dim and filter system bars without blocking touches. Reads zero screen content, keystrokes, or personal data.</string>
 </resources>
