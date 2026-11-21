@@ -178,7 +178,6 @@ class SynkaEngine(context: Context) {
     }
 
     init {
-        // Float output MUST remain false so DefaultAudioSink routes PCM through SvaraAudio
         val renderersFactory = object : DefaultRenderersFactory(appContext) {
             override fun buildAudioSink(
                 context: Context,
@@ -404,9 +403,8 @@ class SynkaEngine(context: Context) {
 
             applyBoundPresetsForUri(uri)
 
-            if (playerCurrentlyVideo |
-
-| visualIsVideo) {
+            val needsVideoDetach = if (playerCurrentlyVideo) true else visualIsVideo
+            if (needsVideoDetach) {
                 boundTextureViewRef?.get()?.let {
                     exoPlayer.clearVideoTextureView(it)
                     clearShaderSafely(it)
@@ -461,9 +459,8 @@ class SynkaEngine(context: Context) {
 
     fun seekTo(positionMs: Long) {
         runOnMain {
-            if (isReleased |
-
-| loadedPlayerUri == null) return@runOnMain
+            if (isReleased) return@runOnMain
+            if (loadedPlayerUri == null) return@runOnMain
             val maxDuration = if (audioDurationMs > 0L) audioDurationMs else Long.MAX_VALUE
             val target = positionMs.coerceIn(0L, maxDuration)
             exoPlayer.seekTo(target)
@@ -610,13 +607,11 @@ class SynkaEngine(context: Context) {
                 } else {
                     pair.second
                 }
-                if (disp != null |
-
-| aud != null) {
+                val keepBinding = if (disp != null) true else aud != null
+                val hadBinding = if (pair.first != null) true else pair.second != null
+                if (keepBinding) {
                     put(uriKey, disp to aud)
-                } else if (pair.first != null |
-
-| pair.second != null) {
+                } else if (hadBinding) {
                     bindingsChanged = true
                 }
             }
@@ -768,9 +763,8 @@ class SynkaEngine(context: Context) {
 
     private fun announceAudioEffectSessionIfNeeded() {
         val sessionId = exoPlayer.audioSessionId
-        if (sessionId == C.AUDIO_SESSION_ID_UNSET |
-
-| sessionId == 0) return
+        if (sessionId == C.AUDIO_SESSION_ID_UNSET) return
+        if (sessionId == 0) return
         if (sessionId == announcedAudioSessionId) return
 
         closeAnnouncedAudioEffectSession()
@@ -787,9 +781,8 @@ class SynkaEngine(context: Context) {
 
     private fun closeAnnouncedAudioEffectSession() {
         val sessionId = announcedAudioSessionId
-        if (sessionId == C.AUDIO_SESSION_ID_UNSET |
-
-| sessionId == 0) return
+        if (sessionId == C.AUDIO_SESSION_ID_UNSET) return
+        if (sessionId == 0) return
         announcedAudioSessionId = C.AUDIO_SESSION_ID_UNSET
         runCatching {
             val intent = Intent(AudioEffect.ACTION_CLOSE_AUDIO_EFFECT_CONTROL_SESSION).apply {
@@ -828,9 +821,11 @@ class SynkaEngine(context: Context) {
 
     private fun syncPlaybackTelemetry() {
         val duration = exoPlayer.duration
-        audioDurationMs = if (duration == C.TIME_UNSET |
-
-| duration < 0L) 0L else duration
+        audioDurationMs = when {
+            duration == C.TIME_UNSET -> 0L
+            duration < 0L -> 0L
+            else -> duration
+        }
         audioPositionMs = exoPlayer.currentPosition.coerceAtLeast(0L)
         isAudioPlaying = exoPlayer.isPlaying
     }
@@ -869,9 +864,8 @@ class SynkaEngine(context: Context) {
             }.getOrNull()
 
             mainHandler.post {
-                if (isReleased |
-
-| imageLoadGeneration.get() != generation) return@post
+                if (isReleased) return@post
+                if (imageLoadGeneration.get() != generation) return@post
                 val iv = targetRef.get() ?: return@post
                 if (bitmap != null) {
                     iv.setImageBitmap(bitmap)
@@ -974,9 +968,9 @@ class SynkaEngine(context: Context) {
                     } else {
                         obj.optString("audioPresetId").takeIf { it.isNotBlank() }
                     }
-                    if (disp != null |
-
-| aud != null) {
+                    if (disp != null) {
+                        map[uriKey] = disp to aud
+                    } else if (aud != null) {
                         map[uriKey] = disp to aud
                     }
                 }
@@ -1021,9 +1015,8 @@ class SynkaEngine(context: Context) {
     }
 
     private fun writeJsonAtomicAsync(fileName: String, content: String) {
-        if (isReleased |
-
-| ioExecutor.isShutdown) return
+        if (isReleased) return
+        if (ioExecutor.isShutdown) return
         ioExecutor.execute {
             runCatching {
                 val target = File(appContext.filesDir, fileName)
