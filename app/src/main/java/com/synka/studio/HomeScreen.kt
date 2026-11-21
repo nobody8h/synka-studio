@@ -1,5 +1,8 @@
 package com.synka.studio
 
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.Canvas as AndroidCanvas
 import android.graphics.Color as AndroidColor
@@ -13,6 +16,7 @@ import android.view.View
 import android.view.ViewGroup
 import android.widget.FrameLayout
 import android.widget.ImageView
+import android.widget.Toast
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.tween
@@ -32,16 +36,21 @@ import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
@@ -50,6 +59,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -63,6 +73,7 @@ import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.StrokeJoin
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
@@ -70,7 +81,9 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 
 @Composable
 fun HomeScreen(
@@ -78,17 +91,18 @@ fun HomeScreen(
     activeDisplayGenre: DisplayGenre?,
     activeAudioGenre: AudioGenre?,
     isPreviewActive: Boolean = true,
-    onDiscoverClick: () -> Unit,
     onOpenDrawer: () -> Unit,
     onPickVisualMedia: () -> Unit,
     onPickAudioMedia: () -> Unit,
     onDisplayGenreTap: (DisplayGenre) -> Unit,
     onAudioGenreTap: (AudioGenre) -> Unit,
     onOpenPresetSheet: (domain: PresetDomain, genre: String) -> Unit,
+    onDiscoverPresetApplied: (SynkaPreset) -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     val colors = LocalSynkaColors.current
     var showUnlockDialog by remember { mutableStateOf(false) }
+    var showDiscoverModal by remember { mutableStateOf(false) }
 
     Column(
         modifier = modifier
@@ -101,7 +115,7 @@ fun HomeScreen(
         HomeTopBar(
             isMasterEnabled = engine.isMasterEnabled,
             onToggleMaster = { engine.toggleMasterEnabled() },
-            onDiscoverClick = onDiscoverClick,
+            onDiscoverClick = { showDiscoverModal = true },
             onOpenDrawer = onOpenDrawer
         )
 
@@ -137,6 +151,425 @@ fun HomeScreen(
 
     if (showUnlockDialog) {
         UnlockRoadmapDialog(onDismiss = { showUnlockDialog = false })
+    }
+
+    if (showDiscoverModal) {
+        DiscoverCatalogModal(
+            engine = engine,
+            onApplyPreset = { preset ->
+                engine.applyPreset(preset)
+                onDiscoverPresetApplied(preset)
+            },
+            onDismiss = { showDiscoverModal = false }
+        )
+    }
+}
+
+// -----------------------------------------------------------------------------
+// Discover & Search Modal powered by PresetShare.DiscoverCatalog
+// -----------------------------------------------------------------------------
+
+@Composable
+private fun DiscoverCatalogModal(
+    engine: SynkaEngine,
+    onApplyPreset: (SynkaPreset) -> Unit,
+    onDismiss: () -> Unit
+) {
+    val context = LocalContext.current
+    val colors = LocalSynkaColors.current
+    val scope = rememberCoroutineScope()
+
+    var searchQuery by remember { mutableStateOf("") }
+    var domainFilter by remember { mutableStateOf<PresetDomain?>(null) }
+    var catalogEntries by remember { mutableStateOf(PresetShare.DiscoverCatalog.currentEntries()) }
+    var isSyncing by remember { mutableStateOf(false) }
+    var statusText by remember {
+        mutableStateOf("Curated community catalog (${catalogEntries.size} presets)")
+    }
+
+    LaunchedEffect(Unit) {
+        isSyncing = true
+        val result = PresetShare.DiscoverCatalog.fetchCatalog(forceRefresh = false)
+        catalogEntries = result.entries
+        statusText = result.statusMessage
+        isSyncing = false
+    }
+
+    val filteredEntries = remember(catalogEntries, searchQuery, domainFilter) {
+        PresetShare.DiscoverCatalog.search(
+            entries = catalogEntries,
+            query = searchQuery,
+            domainFilter = domainFilter
+        )
+    }
+
+    Dialog(
+        onDismissRequest = onDismiss,
+        properties = DialogProperties(usePlatformDefaultWidth = false)
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 14.dp, vertical = 20.dp)
+                .clip(RoundedCornerShape(20.dp))
+                .background(colors.surface)
+                .border(1.dp, colors.hairline, RoundedCornerShape(20.dp))
+                .padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            // Header
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = "Discover Presets",
+                        style = MaterialTheme.typography.headlineSmall,
+                        color = colors.primaryText
+                    )
+                    Text(
+                        text = if (isSyncing) "Checking community feed..." else statusText,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = colors.secondaryText,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Box(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(8.dp))
+                            .background(colors.elevatedSurface)
+                            .border(1.dp, colors.hairline, RoundedCornerShape(8.dp))
+                            .clickable(enabled = !isSyncing) {
+                                scope.launch {
+                                    isSyncing = true
+                                    val result = PresetShare.DiscoverCatalog.fetchCatalog(forceRefresh = true)
+                                    catalogEntries = result.entries
+                                    statusText = result.statusMessage
+                                    isSyncing = false
+                                }
+                            }
+                            .padding(horizontal = 9.dp, vertical = 6.dp)
+                    ) {
+                        Text(
+                            text = if (isSyncing) "..." else "SYNC",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = colors.activeAccent
+                        )
+                    }
+
+                    Box(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(8.dp))
+                            .background(colors.elevatedSurface)
+                            .border(1.dp, colors.hairline, RoundedCornerShape(8.dp))
+                            .clickable(onClick = onDismiss)
+                            .padding(horizontal = 9.dp, vertical = 6.dp)
+                    ) {
+                        Text(
+                            text = "CLOSE",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = colors.secondaryText
+                        )
+                    }
+                }
+            }
+
+            // Search Input
+            OutlinedTextField(
+                value = searchQuery,
+                onValueChange = { searchQuery = it },
+                modifier = Modifier.fillMaxWidth(),
+                singleLine = true,
+                placeholder = {
+                    Text(
+                        text = "Search Kodak, Harman, IEM, OLED, Night...",
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                },
+                trailingIcon = {
+                    if (searchQuery.isNotEmpty()) {
+                        Text(
+                            text = "CLEAR",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = colors.activeAccent,
+                            modifier = Modifier
+                                .clickable { searchQuery = "" }
+                                .padding(end = 10.dp)
+                        )
+                    }
+                },
+                textStyle = MaterialTheme.typography.bodySmall,
+                colors = OutlinedTextFieldDefaults.colors(
+                    focusedBorderColor = colors.activeAccent,
+                    unfocusedBorderColor = colors.hairline,
+                    focusedTextColor = colors.primaryText,
+                    unfocusedTextColor = colors.primaryText,
+                    cursorColor = colors.activeAccent,
+                    focusedContainerColor = colors.background,
+                    unfocusedContainerColor = colors.background,
+                    focusedPlaceholderColor = colors.secondaryText.copy(alpha = 0.7f),
+                    unfocusedPlaceholderColor = colors.secondaryText.copy(alpha = 0.7f)
+                ),
+                shape = RoundedCornerShape(12.dp)
+            )
+
+            // Domain Filter Pills
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                val filters = listOf(
+                    null to "All",
+                    PresetDomain.DISPLAY to "Display",
+                    PresetDomain.AUDIO to "Audio",
+                    PresetDomain.BOTH to "Both"
+                )
+                filters.forEach { (filterDomain, label) ->
+                    val selected = domainFilter == filterDomain
+                    Box(
+                        modifier = Modifier
+                            .weight(1f)
+                            .clip(RoundedCornerShape(50))
+                            .background(if (selected) colors.activeAccent else colors.background)
+                            .border(
+                                width = 1.dp,
+                                color = if (selected) colors.activeAccent else colors.hairline,
+                                shape = RoundedCornerShape(50)
+                            )
+                            .clickable { domainFilter = filterDomain }
+                            .padding(vertical = 7.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(
+                            text = label,
+                            style = MaterialTheme.typography.labelSmall,
+                            fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium,
+                            color = if (selected) SynkaPalette.ObsidianCharcoal else colors.primaryText
+                        )
+                    }
+                }
+            }
+
+            // Results List
+            if (filteredEntries.isEmpty()) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(12.dp))
+                        .background(colors.background)
+                        .border(1.dp, colors.hairline, RoundedCornerShape(12.dp))
+                        .padding(20.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Text(
+                        text = "No presets match \"$searchQuery\"",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = colors.primaryText
+                    )
+                    Text(
+                        text = "Clear Filters",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = colors.activeAccent,
+                        modifier = Modifier.clickable {
+                            searchQuery = ""
+                            domainFilter = null
+                        }
+                    )
+                }
+            } else {
+                LazyColumn(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(max = 390.dp),
+                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    items(filteredEntries, key = { it.preset.id }) { entry ->
+                        val isSaved = engine.userPresets.any {
+                            it.name.equals(entry.preset.name, ignoreCase = true)
+                        }
+                        val isActive = engine.activePresetId == entry.preset.id
+
+                        DiscoverPresetCard(
+                            entry = entry,
+                            isActive = isActive,
+                            isSaved = isSaved,
+                            onApply = {
+                                onApplyPreset(entry.preset)
+                                Toast.makeText(
+                                    context,
+                                    "Applied '${entry.preset.name}'",
+                                    Toast.LENGTH_SHORT
+                                ).show()
+                            },
+                            onSave = {
+                                val saved = engine.saveUserPreset(
+                                    name = entry.preset.name,
+                                    domain = entry.preset.domain,
+                                    displayGenre = entry.preset.displayGenre,
+                                    audioGenre = entry.preset.audioGenre,
+                                    arka = entry.preset.arka,
+                                    svara = entry.preset.svara
+                                )
+                                onApplyPreset(saved)
+                                Toast.makeText(
+                                    context,
+                                    "Saved '${saved.name}' to your presets",
+                                    Toast.LENGTH_SHORT
+                                ).show()
+                            },
+                            onCopyCode = {
+                                val code = PresetShare.encodePreset(entry.preset)
+                                val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                                clipboard.setPrimaryClip(ClipData.newPlainText("Synka Preset", code))
+                                Toast.makeText(
+                                    context,
+                                    "Copied SYNK1 code for '${entry.preset.name}'",
+                                    Toast.LENGTH_SHORT
+                                ).show()
+                            }
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun DiscoverPresetCard(
+    entry: PresetShare.CatalogEntry,
+    isActive: Boolean,
+    isSaved: Boolean,
+    onApply: () -> Unit,
+    onSave: () -> Unit,
+    onCopyCode: () -> Unit
+) {
+    val colors = LocalSynkaColors.current
+    val shape = RoundedCornerShape(14.dp)
+
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(shape)
+            .background(if (isActive) colors.elevatedSurface else colors.background)
+            .border(
+                width = if (isActive) 1.4.dp else 1.dp,
+                color = if (isActive) colors.activeAccent else colors.hairline,
+                shape = shape
+            )
+            .padding(12.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.Top
+        ) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = entry.preset.name,
+                    style = MaterialTheme.typography.titleSmall,
+                    fontWeight = FontWeight.SemiBold,
+                    color = if (isActive) colors.activeAccentStrong else colors.primaryText
+                )
+                Text(
+                    text = "by ${entry.author}" + if (entry.isRemote) " • Remote" else " • Curated",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = colors.secondaryText
+                )
+            }
+
+            Box(
+                modifier = Modifier
+                    .clip(RoundedCornerShape(6.dp))
+                    .background(colors.surface)
+                    .border(1.dp, colors.hairline, RoundedCornerShape(6.dp))
+                    .padding(horizontal = 7.dp, vertical = 3.dp)
+            ) {
+                Text(
+                    text = entry.preset.domain.name,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = colors.activeAccent
+                )
+            }
+        }
+
+        Text(
+            text = entry.description,
+            style = MaterialTheme.typography.bodySmall,
+            color = colors.secondaryText
+        )
+
+        if (entry.tags.isNotEmpty()) {
+            Text(
+                text = entry.tags.joinToString("  •  ") { "#$it" },
+                style = MaterialTheme.typography.labelSmall,
+                color = colors.secondaryText.copy(alpha = 0.78f),
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+        }
+
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            Box(
+                modifier = Modifier
+                    .weight(1f)
+                    .clip(RoundedCornerShape(10.dp))
+                    .background(colors.activeAccent)
+                    .clickable(onClick = onApply)
+                    .padding(vertical = 8.dp),
+                contentAlignment = Alignment.Center
+            ) {
+                Text(
+                    text = if (isActive) "Applied" else "Apply",
+                    style = MaterialTheme.typography.labelMedium,
+                    fontWeight = FontWeight.Bold,
+                    color = SynkaPalette.ObsidianCharcoal
+                )
+            }
+
+            Box(
+                modifier = Modifier
+                    .weight(1f)
+                    .clip(RoundedCornerShape(10.dp))
+                    .background(colors.surface)
+                    .border(1.dp, colors.hairline, RoundedCornerShape(10.dp))
+                    .clickable(onClick = onSave)
+                    .padding(vertical = 8.dp),
+                contentAlignment = Alignment.Center
+            ) {
+                Text(
+                    text = if (isSaved) "Save Copy" else "Save",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = colors.primaryText
+                )
+            }
+
+            Box(
+                modifier = Modifier
+                    .clip(RoundedCornerShape(10.dp))
+                    .background(colors.surface)
+                    .border(1.dp, colors.hairline, RoundedCornerShape(10.dp))
+                    .clickable(onClick = onCopyCode)
+                    .padding(horizontal = 12.dp, vertical = 8.dp),
+                contentAlignment = Alignment.Center
+            ) {
+                Text(
+                    text = "SYNK1",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = colors.secondaryText
+                )
+            }
+        }
     }
 }
 
@@ -432,7 +865,6 @@ private fun LivePreviewCard(
         }
     }
 
-    // Rebind Home views whenever Home owns the active visual preview surface
     LaunchedEffect(engine, textureViewRef, imageViewRef, isPreviewActive) {
         val tv = textureViewRef
         val iv = imageViewRef
@@ -441,14 +873,12 @@ private fun LivePreviewCard(
         }
     }
 
-    // Unbind when HomeScreen leaves composition (tab switch / destroy)
     DisposableEffect(engine) {
         onDispose {
             engine.bindVisualTarget(null, null)
         }
     }
 
-    // Manage TextureView vs ImageView visibility & procedural fallback bitmap
     LaunchedEffect(engine.visualUri, engine.visualIsVideo, isPreviewActive, textureViewRef, imageViewRef) {
         val tv = textureViewRef
         val iv = imageViewRef
@@ -466,7 +896,6 @@ private fun LivePreviewCard(
         }
     }
 
-    // Apply live shader or instant Before/After bypass while held
     LaunchedEffect(
         isPreviewActive,
         isHoldingBeforeAfter,
@@ -512,7 +941,6 @@ private fun LivePreviewCard(
             .background(colors.surface)
             .border(1.dp, colors.hairline, cardShape)
     ) {
-        // Pure neutral preview canvas container (zero artistic wallpaper behind canvas)
         Box(
             modifier = Modifier
                 .fillMaxWidth()
