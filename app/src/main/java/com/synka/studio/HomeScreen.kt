@@ -1,16 +1,19 @@
 package com.synka.studio
 
+import android.Manifest
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
+import android.content.Intent
+import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.graphics.Canvas as AndroidCanvas
 import android.graphics.Color as AndroidColor
 import android.graphics.LinearGradient
 import android.graphics.Paint
 import android.graphics.Shader
-import android.graphics.SurfaceTexture
 import android.os.Build
+import android.provider.Settings
 import android.view.Gravity
 import android.view.TextureView
 import android.view.View
@@ -18,6 +21,8 @@ import android.view.ViewGroup
 import android.widget.FrameLayout
 import android.widget.ImageView
 import android.widget.Toast
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.tween
@@ -83,6 +88,7 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
+import androidx.core.content.ContextCompat
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
@@ -104,6 +110,7 @@ fun HomeScreen(
     val colors = LocalSynkaColors.current
     var showUnlockDialog by remember { mutableStateOf(false) }
     var showDiscoverModal by remember { mutableStateOf(false) }
+    var showAccessibilitySetupDialog by remember { mutableStateOf(false) }
 
     Column(
         modifier = modifier
@@ -132,6 +139,11 @@ fun HomeScreen(
             onPickAudioMedia = onPickAudioMedia
         )
 
+        SystemWideQuickStrip(
+            engine = engine,
+            onRequestAccessibilitySetup = { showAccessibilitySetupDialog = true }
+        )
+
         GenreDeckSection(
             engine = engine,
             activeDisplayGenre = activeDisplayGenre,
@@ -154,6 +166,10 @@ fun HomeScreen(
         UnlockRoadmapDialog(onDismiss = { showUnlockDialog = false })
     }
 
+    if (showAccessibilitySetupDialog) {
+        AccessibilitySetupDialog(onDismiss = { showAccessibilitySetupDialog = false })
+    }
+
     if (showDiscoverModal) {
         DiscoverCatalogModal(
             engine = engine,
@@ -163,6 +179,243 @@ fun HomeScreen(
             },
             onDismiss = { showDiscoverModal = false }
         )
+    }
+}
+
+// -----------------------------------------------------------------------------
+// Compact 1-Tap System-Wide Toggle Bar (Screen Filter + Global Audio EQ)
+// -----------------------------------------------------------------------------
+
+@Composable
+private fun SystemWideQuickStrip(
+    engine: SynkaEngine,
+    onRequestAccessibilitySetup: () -> Unit
+) {
+    val context = LocalContext.current
+    val colors = LocalSynkaColors.current
+
+    val notifPermissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestPermission()
+    ) {
+        SvaraGlobalService.start(context)
+        SvaraGlobalService.updateFromEngine(
+            context,
+            engine.activeSvara,
+            engine.isMasterEnabled,
+            engine.isAudioPlaying
+        )
+    }
+
+    val colorBound = SynkaColorService.isServiceBound
+    val colorEnabled = colorBound && SynkaColorService.isSystemColorEnabled
+    val audioRunning = SvaraGlobalService.isRunning
+
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.spacedBy(10.dp)
+    ) {
+        // 1. System Screen Filter Pill
+        SystemPillButton(
+            title = "Screen (All Apps)",
+            status = when {
+                !colorBound -> "Tap to Enable"
+                colorEnabled -> SynkaColorService.statusSummary
+                else -> "Off"
+            },
+            isActive = colorEnabled,
+            onClick = {
+                if (!colorBound) {
+                    onRequestAccessibilitySetup()
+                } else {
+                    val next = !SynkaColorService.isSystemColorEnabled
+                    SynkaColorService.updateFromEngine(context, engine.activeArka, engine.isMasterEnabled)
+                    SynkaColorService.setEnabled(context, next)
+                }
+            },
+            modifier = Modifier.weight(1f)
+        )
+
+        // 2. System Audio EQ Pill
+        SystemPillButton(
+            title = "System Audio EQ",
+            status = if (audioRunning) SvaraGlobalService.statusSummary else "Off",
+            isActive = audioRunning,
+            onClick = {
+                if (audioRunning) {
+                    SvaraGlobalService.stop(context)
+                } else {
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+                        ContextCompat.checkSelfPermission(
+                            context,
+                            Manifest.permission.POST_NOTIFICATIONS
+                        ) != PackageManager.PERMISSION_GRANTED
+                    ) {
+                        notifPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+                    } else {
+                        SvaraGlobalService.start(context)
+                        SvaraGlobalService.updateFromEngine(
+                            context,
+                            engine.activeSvara,
+                            engine.isMasterEnabled,
+                            engine.isAudioPlaying
+                        )
+                    }
+                }
+            },
+            modifier = Modifier.weight(1f)
+        )
+    }
+}
+
+@Composable
+private fun SystemPillButton(
+    title: String,
+    status: String,
+    isActive: Boolean,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    val colors = LocalSynkaColors.current
+    val shape = RoundedCornerShape(12.dp)
+
+    Row(
+        modifier = modifier
+            .clip(shape)
+            .background(if (isActive) colors.elevatedSurface else colors.surface)
+            .border(
+                width = if (isActive) 1.3.dp else 1.dp,
+                color = if (isActive) colors.activeAccent else colors.hairline,
+                shape = shape
+            )
+            .clickable(onClick = onClick)
+            .padding(horizontal = 10.dp, vertical = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        Box(
+            modifier = Modifier
+                .size(8.dp)
+                .clip(CircleShape)
+                .background(if (isActive) SynkaPalette.SindoorCrimson else colors.secondaryText.copy(alpha = 0.4f))
+        )
+
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                text = title,
+                style = MaterialTheme.typography.labelSmall,
+                fontWeight = FontWeight.SemiBold,
+                color = if (isActive) colors.activeAccentStrong else colors.primaryText,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+            Text(
+                text = status,
+                style = MaterialTheme.typography.labelSmall,
+                fontSize = 9.sp,
+                color = colors.secondaryText,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+        }
+    }
+}
+
+@Composable
+private fun AccessibilitySetupDialog(onDismiss: () -> Unit) {
+    val context = LocalContext.current
+    val colors = LocalSynkaColors.current
+
+    Dialog(onDismissRequest = onDismiss) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(18.dp))
+                .background(colors.surface)
+                .border(1.dp, colors.hairline, RoundedCornerShape(18.dp))
+                .padding(18.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            Text(
+                text = "Enable System Screen Filter",
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.SemiBold,
+                color = colors.primaryText
+            )
+
+            Text(
+                text = "Applies Warmth, Tint, Paper Matte, RGB Trim, and Subzero Dimmer over YouTube, Gallery, and video players with zero root or PC.",
+                style = MaterialTheme.typography.bodySmall,
+                color = colors.secondaryText
+            )
+
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(12.dp))
+                    .background(colors.background)
+                    .border(1.dp, colors.hairline, RoundedCornerShape(12.dp))
+                    .padding(12.dp),
+                verticalArrangement = Arrangement.spacedBy(5.dp)
+            ) {
+                Text(
+                    text = "SIMPLE 2-STEP SETUP",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = colors.activeAccent
+                )
+                Text(
+                    text = "1. Tap 'Open Accessibility' below.\n2. Under Downloaded apps, turn ON 'Synka Screen Filter'.\n\nBanking apps, permission popups, and DRM layers are auto-cloaked.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = colors.primaryText
+                )
+            }
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                Box(
+                    modifier = Modifier
+                        .weight(1f)
+                        .clip(RoundedCornerShape(10.dp))
+                        .background(colors.elevatedSurface)
+                        .border(1.dp, colors.hairline, RoundedCornerShape(10.dp))
+                        .clickable(onClick = onDismiss)
+                        .padding(vertical = 10.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(
+                        text = "Cancel",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = colors.primaryText
+                    )
+                }
+
+                Box(
+                    modifier = Modifier
+                        .weight(1.4f)
+                        .clip(RoundedCornerShape(10.dp))
+                        .background(colors.activeAccent)
+                        .clickable {
+                            runCatching {
+                                context.startActivity(
+                                    Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)
+                                        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                                )
+                            }
+                            onDismiss()
+                        }
+                        .padding(vertical = 10.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(
+                        text = "Open Accessibility",
+                        style = MaterialTheme.typography.labelMedium,
+                        fontWeight = FontWeight.Bold,
+                        color = SynkaPalette.ObsidianCharcoal
+                    )
+                }
+            }
+        }
     }
 }
 
@@ -688,10 +941,6 @@ private fun MasterBypassPillToggle(
     }
 }
 
-// -----------------------------------------------------------------------------
-// Thin Banner: "UNLOCK The full Potential" (Yantra watermark ONLY in Artisan)
-// -----------------------------------------------------------------------------
-
 @Composable
 private fun UnlockPotentialBanner(
     isArtisanMode: Boolean,
@@ -743,7 +992,7 @@ private fun UnlockPotentialBanner(
             }
 
             Text(
-                text = "v1 ROADMAP",
+                text = "SYSTEM MODE",
                 style = MaterialTheme.typography.labelSmall,
                 color = colors.activeAccent
             )
@@ -766,7 +1015,7 @@ private fun UnlockRoadmapDialog(onDismiss: () -> Unit) {
             verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
             Text(
-                text = "Synka Studio Roadmap",
+                text = "Synka Studio Capabilities",
                 style = MaterialTheme.typography.headlineSmall,
                 color = colors.primaryText
             )
@@ -780,12 +1029,12 @@ private fun UnlockRoadmapDialog(onDismiss: () -> Unit) {
                 verticalArrangement = Arrangement.spacedBy(4.dp)
             ) {
                 Text(
-                    text = "v1 • LOCAL MEDIA SANDBOX (ACTIVE)",
+                    text = "IN-APP STUDIO (FULL PRECISION)",
                     style = MaterialTheme.typography.labelMedium,
                     color = colors.activeAccent
                 )
                 Text(
-                    text = "All features are unlocked locally. Arka runs live AGSL 8-channel HSL and tone grading on your chosen photos and videos, while Svara processes local audio through a 12-stage TDF-II parametric DSP chain without root or DRM workarounds.",
+                    text = "Arka runs 8-band HSL (Red Iso), tone curves, and globes via AGSL GPU shaders on local photos/videos. Svara runs 12-stage TDF-II parametric DSP on local audio.",
                     style = MaterialTheme.typography.bodySmall,
                     color = colors.primaryText
                 )
@@ -801,12 +1050,12 @@ private fun UnlockRoadmapDialog(onDismiss: () -> Unit) {
                 verticalArrangement = Arrangement.spacedBy(4.dp)
             ) {
                 Text(
-                    text = "v2 • TV & SYSTEM EXTENSIONS (PLANNED)",
+                    text = "SYSTEM-WIDE MODE (ALL APPS)",
                     style = MaterialTheme.typography.labelMedium,
                     color = colors.secondaryText
                 )
                 Text(
-                    text = "Planned work explores companion Smart TV calibration console sync, external display reference profiles, and Android system audio/overlay hooks where OS security boundaries permit. Nothing is paywalled or simulated in v1.",
+                    text = "Screen Filter uses Android Accessibility Overlay for global Warmth, Tint, Paper, and Subzero Dimming (auto-cloaks on banking apps & DRM). System Audio EQ uses DynamicsProcessing across media apps while pausing during calls.",
                     style = MaterialTheme.typography.bodySmall,
                     color = colors.secondaryText
                 )
@@ -849,7 +1098,6 @@ private fun LivePreviewCard(
     val colors = LocalSynkaColors.current
     val cardShape = RoundedCornerShape(18.dp)
 
-    var containerViewRef by remember { mutableStateOf<FrameLayout?>(null) }
     var textureViewRef by remember { mutableStateOf<TextureView?>(null) }
     var imageViewRef by remember { mutableStateOf<ImageView?>(null) }
     var isHoldingBeforeAfter by remember { mutableStateOf(false) }
@@ -863,21 +1111,20 @@ private fun LivePreviewCard(
         }
     }
 
-    LaunchedEffect(engine, containerViewRef, textureViewRef, imageViewRef, isPreviewActive) {
-        val container = containerViewRef
+    LaunchedEffect(engine, textureViewRef, imageViewRef, isPreviewActive) {
         val tv = textureViewRef
         val iv = imageViewRef
-        if (isPreviewActive && container != null && tv != null && iv != null) {
-            engine.bindVisualTarget(tv, iv, container)
+        if (isPreviewActive && tv != null && iv != null) {
+            engine.bindVisualTarget(tv, iv)
         }
     }
 
-    DisposableEffect(engine, containerViewRef, textureViewRef, imageViewRef) {
-        val container = containerViewRef
+    // Identity-safe unbind so leaving Home never strips ArkaStudio's newly bound preview
+    DisposableEffect(engine, textureViewRef, imageViewRef) {
         val tv = textureViewRef
         val iv = imageViewRef
         onDispose {
-            engine.unbindVisualTarget(tv, iv, container)
+            engine.unbindVisualTarget(tv, iv)
         }
     }
 
@@ -905,21 +1152,32 @@ private fun LivePreviewCard(
         engine.activeArka,
         engine.visualUri,
         engine.visualIsVideo,
-        containerViewRef,
         textureViewRef,
         imageViewRef
     ) {
         if (!isPreviewActive) return@LaunchedEffect
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            val bypass = isHoldingBeforeAfter || !engine.isMasterEnabled
-            val container = containerViewRef ?: return@LaunchedEffect
-            textureViewRef?.let { engine.arkaShader.clearFromView(it) }
-            imageViewRef?.let { engine.arkaShader.clearFromView(it) }
-            engine.arkaShader.applyToView(
-                targetView = container,
-                params = engine.activeArka,
-                bypass = bypass
-            )
+            val bypass = isHoldingBeforeAfter |
+
+| !engine.isMasterEnabled
+            val activeView: View? = if (engine.visualUri != null && engine.visualIsVideo) {
+                textureViewRef
+            } else {
+                imageViewRef
+            }
+            val inactiveView: View? = if (engine.visualUri != null && engine.visualIsVideo) {
+                imageViewRef
+            } else {
+                textureViewRef
+            }
+            inactiveView?.let { engine.arkaShader.clearFromView(it) }
+            activeView?.let {
+                engine.arkaShader.applyToView(
+                    targetView = it,
+                    params = engine.activeArka,
+                    bypass = bypass
+                )
+            }
         }
     }
 
@@ -968,7 +1226,6 @@ private fun LivePreviewCard(
                             ViewGroup.LayoutParams.MATCH_PARENT,
                             ViewGroup.LayoutParams.MATCH_PARENT
                         )
-                        val parentFrame = this
 
                         val tv = TextureView(ctx).apply {
                             layoutParams = FrameLayout.LayoutParams(
@@ -977,29 +1234,6 @@ private fun LivePreviewCard(
                                 Gravity.CENTER
                             )
                             visibility = View.GONE
-                            surfaceTextureListener = object : TextureView.SurfaceTextureListener {
-                                override fun onSurfaceTextureAvailable(
-                                    surface: SurfaceTexture,
-                                    width: Int,
-                                    height: Int
-                                ) {
-                                    parentFrame.invalidate()
-                                }
-
-                                override fun onSurfaceTextureSizeChanged(
-                                    surface: SurfaceTexture,
-                                    width: Int,
-                                    height: Int
-                                ) {
-                                    parentFrame.invalidate()
-                                }
-
-                                override fun onSurfaceTextureDestroyed(surface: SurfaceTexture): Boolean = true
-
-                                override fun onSurfaceTextureUpdated(surface: SurfaceTexture) {
-                                    parentFrame.invalidate()
-                                }
-                            }
                         }
 
                         val iv = ImageView(ctx).apply {
@@ -1010,28 +1244,26 @@ private fun LivePreviewCard(
                             )
                             scaleType = ImageView.ScaleType.FIT_CENTER
                             visibility = View.VISIBLE
-                            if (!testPatternBitmap.isRecycled) {
-                                setImageBitmap(testPatternBitmap)
-                            }
                         }
 
                         addView(tv)
                         addView(iv)
-                        containerViewRef = parentFrame
                         textureViewRef = tv
                         imageViewRef = iv
                     }
                 },
                 onRelease = { container ->
-                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                        engine.arkaShader.clearFromView(container)
-                        textureViewRef?.let { engine.arkaShader.clearFromView(it) }
-                        imageViewRef?.let { engine.arkaShader.clearFromView(it) }
+                    textureViewRef?.let { tv ->
+                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                            engine.arkaShader.clearFromView(tv)
+                        }
                     }
-                    textureViewRef?.surfaceTextureListener = null
-                    engine.unbindVisualTarget(textureViewRef, imageViewRef, container)
+                    imageViewRef?.let { iv ->
+                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                            engine.arkaShader.clearFromView(iv)
+                        }
+                    }
                     container.removeAllViews()
-                    containerViewRef = null
                     textureViewRef = null
                     imageViewRef = null
                 }
@@ -1111,7 +1343,9 @@ private fun CompactAudioStatusBar(
     onPickAudioMedia: () -> Unit
 ) {
     val colors = LocalSynkaColors.current
-    val hasPlayableAudio = engine.audioUri != null || (engine.visualUri != null && engine.visualIsVideo)
+    val hasPlayableAudio = engine.audioUri != null |
+
+| (engine.visualUri != null && engine.visualIsVideo)
 
     val miniBars = remember { FloatArray(SvaraAudio.WAVEFORM_BARS) }
     var pulseTick by remember { mutableIntStateOf(0) }
@@ -1456,10 +1690,6 @@ private fun GenreDeckCard(
     }
 }
 
-// -----------------------------------------------------------------------------
-// Neutral Procedural Color-Gradient Test Pattern Bitmap (shared with PresetSheet)
-// -----------------------------------------------------------------------------
-
 internal fun createCalibrationTestPatternBitmap(width: Int, height: Int): Bitmap {
     val bmp = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
     val canvas = AndroidCanvas(bmp)
@@ -1530,10 +1760,6 @@ internal fun createCalibrationTestPatternBitmap(width: Int, height: Int): Bitmap
 
     return bmp
 }
-
-// -----------------------------------------------------------------------------
-// Crisp Minimal Studio Vector Glyphs
-// -----------------------------------------------------------------------------
 
 @Composable
 private fun SearchLoupeIcon(color: Color, modifier: Modifier = Modifier) {
