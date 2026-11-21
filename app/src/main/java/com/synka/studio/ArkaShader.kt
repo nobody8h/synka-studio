@@ -44,9 +44,6 @@ object ArkaShader {
 
         const float PI = 3.14159265;
 
-        // Asymmetric piecewise raised-cosine weight around centerDeg with circular wrap-around.
-        // Adjacent bands share the exact inter-band span, guaranteeing Partition of Unity:
-        // sum(w0..w7) == 1.0 everywhere on [0, 360) with C1 continuity.
         float bandWeight(float hDeg, float centerDeg, float leftSpan, float rightSpan) {
             float delta = mod(hDeg - centerDeg + 180.0, 360.0) - 180.0;
             float span = (delta < 0.0) ? leftSpan : rightSpan;
@@ -54,7 +51,6 @@ object ArkaShader {
             return 0.5 + 0.5 * cos(PI * t);
         }
 
-        // 32-bit float RGB -> HSL with strict zero-chroma NaN guards
         float3 rgbToHsl(float3 rgb) {
             float cMax = max(rgb.r, max(rgb.g, rgb.b));
             float cMin = min(rgb.r, min(rgb.g, rgb.b));
@@ -80,7 +76,6 @@ object ArkaShader {
             return float3(h, s, l);
         }
 
-        // Branchless, division-free HSL -> RGB
         float3 hslToRgb(float3 hsl) {
             float h = fract(hsl.x);
             float s = clamp(hsl.y, 0.0, 1.0);
@@ -93,7 +88,6 @@ object ArkaShader {
             return clamp(rgb * c + float3(m), 0.0, 1.0);
         }
 
-        // Maps 2D globe (x: cool..warm, y: magenta..teal-green) to a subtle RGB offset
         float3 globeTintVector(float2 xy) {
             return float3(
                 xy.x,
@@ -103,24 +97,21 @@ object ArkaShader {
         }
 
         half4 main(float2 coords) {
-            // 1. Safe un-premultiply in 32-bit float (avoids fp16 FTZ subnormal underflow)
             half4 c = inputShader.eval(coords);
             float a = clamp(float(c.a), 0.0, 1.0);
             float3 rgb = clamp(float3(c.rgb) / max(a, 0.0001), 0.0, 1.0);
 
-            // 2. Unrolled 8-band circular raised-cosine HSL grading (zero dynamic array indexing)
             float3 hsl = rgbToHsl(rgb);
             float hDeg = hsl.x * 360.0;
 
-            // Centers: 0, 30, 60, 120, 180, 240, 275, 320 deg
-            float w0 = bandWeight(hDeg,   0.0, 40.0, 30.0); // RED
-            float w1 = bandWeight(hDeg,  30.0, 30.0, 30.0); // ORANGE
-            float w2 = bandWeight(hDeg,  60.0, 30.0, 60.0); // YELLOW
-            float w3 = bandWeight(hDeg, 120.0, 60.0, 60.0); // GREEN
-            float w4 = bandWeight(hDeg, 180.0, 60.0, 60.0); // CYAN
-            float w5 = bandWeight(hDeg, 240.0, 60.0, 35.0); // BLUE
-            float w6 = bandWeight(hDeg, 275.0, 35.0, 45.0); // PURPLE
-            float w7 = bandWeight(hDeg, 320.0, 45.0, 40.0); // MAGENTA
+            float w0 = bandWeight(hDeg,   0.0, 40.0, 30.0);
+            float w1 = bandWeight(hDeg,  30.0, 30.0, 30.0);
+            float w2 = bandWeight(hDeg,  60.0, 30.0, 60.0);
+            float w3 = bandWeight(hDeg, 120.0, 60.0, 60.0);
+            float w4 = bandWeight(hDeg, 180.0, 60.0, 60.0);
+            float w5 = bandWeight(hDeg, 240.0, 60.0, 35.0);
+            float w6 = bandWeight(hDeg, 275.0, 35.0, 45.0);
+            float w7 = bandWeight(hDeg, 320.0, 45.0, 40.0);
 
             float satScale =
                 w0 * uSatMultA.x + w1 * uSatMultA.y + w2 * uSatMultA.z + w3 * uSatMultA.w +
@@ -134,9 +125,7 @@ object ArkaShader {
                 w0 * uLumA.x + w1 * uLumA.y + w2 * uLumA.z + w3 * uLumA.w +
                 w4 * uLumB.x + w5 * uLumB.y + w6 * uLumB.z + w7 * uLumB.w;
 
-            // Gate hue/lum band edits by source chroma so neutral grays never inherit Red (H=0)
             float chromaGate = smoothstep(0.0, 0.12, hsl.y);
-            // Parabolic lightness envelope protects pure black (L=0) and pure white (L=1)
             float lumEnvelope = 4.0 * hsl.z * (1.0 - hsl.z);
 
             float newH = fract(hsl.x + hueShift * chromaGate);
@@ -145,7 +134,6 @@ object ArkaShader {
 
             rgb = hslToRgb(float3(newH, newS, newL));
 
-            // 3. 5-zone smoothstep Tone EQ (blacks, shadows, mids, highlights, whites)
             float luma = dot(rgb, float3(0.2126, 0.7152, 0.0722));
             float zBlacks     = 1.0 - smoothstep(0.00, 0.22, luma);
             float zShadows    = smoothstep(0.02, 0.22, luma) * (1.0 - smoothstep(0.25, 0.50, luma));
@@ -162,7 +150,6 @@ object ArkaShader {
 
             rgb = clamp(rgb + float3(toneDelta), 0.0, 1.0);
 
-            // 4. Dual Shadow / Highlight 2D tint globes + global warmth & tint
             float tintLuma = dot(rgb, float3(0.2126, 0.7152, 0.0722));
             float shWeight = (1.0 - tintLuma) * (1.0 - tintLuma);
             float hiWeight = tintLuma * tintLuma;
@@ -184,7 +171,6 @@ object ArkaShader {
                 1.0
             );
 
-            // 5. Comfort & Optics: matte paper mode, RGB trim, and post-grade Subzero Dimmer
             float paper = uOptics.x;
             if (paper > 0.0001) {
                 float pLuma = dot(rgb, float3(0.2126, 0.7152, 0.0722));
@@ -194,16 +180,13 @@ object ArkaShader {
 
             rgb = clamp(rgb * (float3(1.0) + uTrim), 0.0, 1.0);
 
-            // Subzero dimmer caps attenuation at 85% so controls remain legible at 100%
             float dimGain = 1.0 - (uOptics.y * 0.85);
             rgb = clamp(rgb * dimGain, 0.0, 1.0);
 
-            // 6. Re-premultiply by original alpha to preserve HWUI compositing invariants
             return half4(half3(rgb * a), half(a));
         }
     """
 
-    // Lazily compiled once on the main thread; uniforms are snapshotted into each new RenderEffect.
     @RequiresApi(Build.VERSION_CODES.TIRAMISU)
     private var cachedShader: RuntimeShader? = null
 
@@ -317,15 +300,16 @@ object ArkaShader {
             norm.subzeroDimmer / 100f
         )
 
-        // Always re-create RenderEffect so HWUI snapshots the updated uniform buffer on RenderThread
         val effect = RenderEffect.createRuntimeShaderEffect(shader, INPUT_SHADER_NAME)
         targetView.setRenderEffect(effect)
         targetView.invalidate()
+        (targetView.parent as? View)?.invalidate()
     }
 
     @RequiresApi(Build.VERSION_CODES.TIRAMISU)
     fun clearFromView(targetView: View) {
         targetView.setRenderEffect(null)
         targetView.invalidate()
+        (targetView.parent as? View)?.invalidate()
     }
 }
