@@ -1,4 +1,4 @@
- package com.synka.studio
+package com.synka.studio
 
 import android.content.ClipData
 import android.content.ClipboardManager
@@ -24,6 +24,7 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.annotation.OptIn
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -39,6 +40,8 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.FilterChip
+import androidx.compose.material3.FilterChipDefaults
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Slider
@@ -86,6 +89,11 @@ private enum class MediaMode {
     AUDIO
 }
 
+private data class QuickPresetChip(
+    val chipLabel: String,
+    val preset: SynkaPreset
+)
+
 class MainActivity : ComponentActivity() {
 
     companion object {
@@ -106,8 +114,8 @@ class MainActivity : ComponentActivity() {
         val synkaDarkColors = darkColorScheme(
             background = Color(0xFF121212),
             surface = Color(0xFF1E1E1E),
-            primary = Color(0xFF8AB4F8),
-            onPrimary = Color(0xFF002D6C),
+            primary = Color(0xFFD49A45),
+            onPrimary = Color(0xFF121212),
             error = Color(0xFFCF6679),
             onError = Color(0xFF000000),
             onBackground = Color(0xFFE3E3E3),
@@ -186,6 +194,16 @@ class MainActivity : ComponentActivity() {
 private fun SynkaSpikeScreen() {
     val context = LocalContext.current
 
+    val quickPresets = remember {
+        listOf(
+            QuickPresetChip("Kora", SynkaBuiltInPresets.KORA),
+            QuickPresetChip("Cinema Grade", SynkaBuiltInPresets.CINEMA_TEAL_GOLD),
+            QuickPresetChip("Red Iso", SynkaBuiltInPresets.RED_ISO_CRIMSON_LOCK),
+            QuickPresetChip("B&W", SynkaBuiltInPresets.BW_SILVER_GELATIN),
+            QuickPresetChip("Warm", SynkaBuiltInPresets.WARM_GOLDEN_HOUR)
+        )
+    }
+
     val svaraAudio = remember { SvaraAudio() }
     val exoPlayer = remember {
         val renderersFactory = object : DefaultRenderersFactory(context) {
@@ -193,7 +211,7 @@ private fun SynkaSpikeScreen() {
                 context: Context,
                 enableFloatOutput: Boolean,
                 enableAudioTrackPlaybackParams: Boolean
-            ): AudioSink? {
+            ): AudioSink {
                 return DefaultAudioSink.Builder(context)
                     .setAudioProcessors(arrayOf<AudioProcessor>(svaraAudio))
                     .build()
@@ -211,13 +229,17 @@ private fun SynkaSpikeScreen() {
     var durationMs by remember { mutableLongStateOf(0L) }
     var isScrubbing by remember { mutableStateOf(false) }
 
-    var saturation by remember { mutableFloatStateOf(1.0f) }
-    var warmth by remember { mutableFloatStateOf(0.0f) }
+    var selectedPreset by remember { mutableStateOf(quickPresets.first().preset) }
+    var subzeroDimmer by remember { mutableFloatStateOf(selectedPreset.arka.subzeroDimmer) }
     var bassDb by remember { mutableFloatStateOf(0.0f) }
     var bypass by remember { mutableStateOf(false) }
 
     var textureViewRef by remember { mutableStateOf<TextureView?>(null) }
     var imageViewRef by remember { mutableStateOf<ImageView?>(null) }
+
+    val activeArkaParams = remember(selectedPreset, subzeroDimmer) {
+        selectedPreset.arka.copy(subzeroDimmer = subzeroDimmer).normalized()
+    }
 
     fun persistUri(uri: Uri) {
         runCatching {
@@ -323,21 +345,26 @@ private fun SynkaSpikeScreen() {
         }
     }
 
-    LaunchedEffect(saturation, warmth, bypass, mediaMode, photoUri) {
-        svaraAudio.bassGainDb = bassDb
+    // Re-create RenderEffect and attach to active View on every parameter, mode, or view update
+    LaunchedEffect(activeArkaParams, bypass, mediaMode, photoUri, textureViewRef, imageViewRef) {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             val activeView = when (mediaMode) {
                 MediaMode.VIDEO -> textureViewRef
                 MediaMode.PHOTO -> imageViewRef
                 else -> null
             }
-            activeView?.let { view ->
-                // Post to view/main handler so layout/surface state is settled before re-binding RenderEffect
-                Handler(Looper.getMainLooper()).post {
+            val inactiveView = when (mediaMode) {
+                MediaMode.VIDEO -> imageViewRef
+                MediaMode.PHOTO -> textureViewRef
+                else -> null
+            }
+
+            Handler(Looper.getMainLooper()).post {
+                inactiveView?.let { ArkaShader.clearFromView(it) }
+                if (activeView != null) {
                     ArkaShader.applyToView(
-                        targetView = view,
-                        warmth = warmth,
-                        saturation = saturation,
+                        targetView = activeView,
+                        params = activeArkaParams,
                         bypass = bypass
                     )
                 }
@@ -364,13 +391,13 @@ private fun SynkaSpikeScreen() {
         ) {
             Column {
                 Text(
-                    text = "Synka Chunk 1 Ready",
+                    text = "Synka Studio • Arka GPU",
                     fontSize = 20.sp,
                     fontWeight = FontWeight.Bold,
                     color = Color.White
                 )
                 Text(
-                    text = "API ${Build.VERSION.SDK_INT} (${Build.MODEL}) • Chunk 2 Spike",
+                    text = "API ${Build.VERSION.SDK_INT} (${Build.MODEL}) • Chunk 4 Gate",
                     fontSize = 12.sp,
                     fontFamily = FontFamily.Monospace,
                     color = Color(0xFF9E9E9E)
@@ -379,7 +406,7 @@ private fun SynkaSpikeScreen() {
 
             Button(
                 onClick = {
-                    throw RuntimeException("Synka Test Gate 2: Simulated uncaught exception on API ${Build.VERSION.SDK_INT}")
+                    throw RuntimeException("Synka Test Gate 4: Simulated uncaught exception on API ${Build.VERSION.SDK_INT}")
                 },
                 colors = ButtonDefaults.buttonColors(
                     containerColor = Color(0xFFCF6679),
@@ -387,7 +414,7 @@ private fun SynkaSpikeScreen() {
                 ),
                 shape = RoundedCornerShape(8.dp)
             ) {
-                Text("Simulate Test Crash", fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+                Text("Simulate Crash", fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
             }
         }
 
@@ -470,7 +497,7 @@ private fun SynkaSpikeScreen() {
             text = mediaLabel,
             fontSize = 12.sp,
             fontFamily = FontFamily.Monospace,
-            color = Color(0xFF8AB4F8),
+            color = Color(0xFFD49A45),
             maxLines = 1
         )
 
@@ -546,33 +573,67 @@ private fun SynkaSpikeScreen() {
             )
         }
 
-        // Saturation Slider (0.0 .. 2.0)
-        Column(modifier = Modifier.fillMaxWidth()) {
+        // Quick-tap Arka Preset Test Bar
+        Column(
+            modifier = Modifier.fillMaxWidth(),
+            verticalArrangement = Arrangement.spacedBy(6.dp)
+        ) {
+            val soloLabels = ColorBand.entries
+                .filterIndexed { idx, _ -> activeArkaParams.bands[idx].solo }
+                .joinToString(",") { it.shortLabel }
+            val soloSuffix = if (soloLabels.isNotEmpty()) " • SOLO: $soloLabels" else ""
+
             Text(
-                text = String.format(Locale.US, "Saturation: %.2f", saturation),
+                text = "Arka Grade: ${selectedPreset.name}$soloSuffix",
                 fontSize = 13.sp,
                 fontFamily = FontFamily.Monospace,
                 color = Color(0xFFE3E3E3)
             )
-            Slider(
-                value = saturation,
-                onValueChange = { saturation = it },
-                valueRange = 0f..2f
-            )
+
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                quickPresets.forEach { item ->
+                    val isSelected = selectedPreset.id == item.preset.id
+                    FilterChip(
+                        selected = isSelected,
+                        onClick = {
+                            selectedPreset = item.preset
+                            subzeroDimmer = item.preset.arka.subzeroDimmer
+                        },
+                        label = {
+                            Text(
+                                text = item.chipLabel,
+                                fontSize = 12.sp,
+                                fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal
+                            )
+                        },
+                        colors = FilterChipDefaults.filterChipColors(
+                            selectedContainerColor = Color(0xFFD49A45),
+                            selectedLabelColor = Color(0xFF121212),
+                            containerColor = Color(0xFF1E1E1E),
+                            labelColor = Color(0xFFE3E3E3)
+                        )
+                    )
+                }
+            }
         }
 
-        // Warmth Slider (-1.0 .. 1.0)
+        // Subzero Dimmer Test Slider (0 .. 100%)
         Column(modifier = Modifier.fillMaxWidth()) {
             Text(
-                text = String.format(Locale.US, "Warmth: %.2f", warmth),
+                text = String.format(Locale.US, "Subzero Dimmer: %.0f%%", subzeroDimmer),
                 fontSize = 13.sp,
                 fontFamily = FontFamily.Monospace,
                 color = Color(0xFFE3E3E3)
             )
             Slider(
-                value = warmth,
-                onValueChange = { warmth = it },
-                valueRange = -1f..1f
+                value = subzeroDimmer,
+                onValueChange = { subzeroDimmer = it },
+                valueRange = 0f..100f
             )
         }
 
