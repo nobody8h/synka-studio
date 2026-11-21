@@ -207,6 +207,7 @@ private fun SynkaAppShell(engine: SynkaEngine) {
     var activeTab by remember { mutableStateOf(SynkaTab.HOME) }
     val drawerState = rememberDrawerState(initialValue = DrawerValue.Closed)
     var activePresetSheet by remember { mutableStateOf<PresetSheetStateModel?>(null) }
+    var jumpToDisplayStudioAfterSaf by remember { mutableStateOf(false) }
 
     // Independent Display/Audio genre highlights and last-used preset memory per genre
     var activeDisplayGenre by remember { mutableStateOf<DisplayGenre?>(null) }
@@ -226,14 +227,46 @@ private fun SynkaAppShell(engine: SynkaEngine) {
         }
     }
 
+    fun syncGenreHighlightsForPreset(preset: SynkaPreset) {
+        if (preset.id == SynkaBuiltInPresets.KORA.id) {
+            activeDisplayGenre = null
+            activeAudioGenre = null
+            return
+        }
+        preset.displayGenre?.let { genre ->
+            activeDisplayGenre = genre
+            lastUsedPresetByGenre["${PresetDomain.DISPLAY.name}:${genre.name}"] = preset.id
+        }
+        preset.audioGenre?.let { genre ->
+            activeAudioGenre = genre
+            lastUsedPresetByGenre["${PresetDomain.AUDIO.name}:${genre.name}"] = preset.id
+        }
+    }
+
+    fun syncGenreHighlightsForFileBinding(uri: Uri) {
+        val binding = engine.perFileBindings[uri.toString()] ?: return
+        binding.first?.let { id ->
+            engine.findPresetById(id)?.let { syncGenreHighlightsForPreset(it) }
+        }
+        binding.second?.let { id ->
+            engine.findPresetById(id)?.let { syncGenreHighlightsForPreset(it) }
+        }
+    }
+
     val visualMediaPicker = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.OpenDocument()
     ) { uri ->
+        val shouldJump = jumpToDisplayStudioAfterSaf
+        jumpToDisplayStudioAfterSaf = false
         if (uri != null) {
             takeReadPermission(uri)
             val mime = context.contentResolver.getType(uri).orEmpty()
             val isVideo = mime.startsWith("video/")
             engine.setVisualMedia(uri = uri, isVideo = isVideo)
+            syncGenreHighlightsForFileBinding(uri)
+            if (shouldJump) {
+                activeTab = SynkaTab.DISPLAY_EQ
+            }
         }
     }
 
@@ -243,6 +276,7 @@ private fun SynkaAppShell(engine: SynkaEngine) {
         if (uri != null) {
             takeReadPermission(uri)
             engine.setAudioMedia(uri = uri)
+            syncGenreHighlightsForFileBinding(uri)
         }
     }
 
@@ -283,22 +317,6 @@ private fun SynkaAppShell(engine: SynkaEngine) {
         }
         engine.activePresetId?.let { id ->
             lastUsedPresetByGenre["${PresetDomain.AUDIO.name}:${genre.name}"] = id
-        }
-    }
-
-    fun syncGenreHighlightsForPreset(preset: SynkaPreset) {
-        if (preset.id == SynkaBuiltInPresets.KORA.id) {
-            activeDisplayGenre = null
-            activeAudioGenre = null
-            return
-        }
-        preset.displayGenre?.let { genre ->
-            activeDisplayGenre = genre
-            lastUsedPresetByGenre["${PresetDomain.DISPLAY.name}:${genre.name}"] = preset.id
-        }
-        preset.audioGenre?.let { genre ->
-            activeAudioGenre = genre
-            lastUsedPresetByGenre["${PresetDomain.AUDIO.name}:${genre.name}"] = preset.id
         }
     }
 
@@ -367,6 +385,7 @@ private fun SynkaAppShell(engine: SynkaEngine) {
                                     scope.launch { drawerState.open() }
                                 },
                                 onPickVisualMedia = {
+                                    jumpToDisplayStudioAfterSaf = false
                                     visualMediaPicker.launch(arrayOf("image/*", "video/*"))
                                 },
                                 onPickAudioMedia = {
@@ -406,6 +425,7 @@ private fun SynkaAppShell(engine: SynkaEngine) {
                                 activeDisplayGenre = activeDisplayGenre,
                                 isPreviewActive = !isPresetSheetShowingVisual,
                                 onEditVisualMedia = {
+                                    jumpToDisplayStudioAfterSaf = false
                                     visualMediaPicker.launch(arrayOf("image/*", "video/*"))
                                 },
                                 onResetToKora = {
@@ -441,11 +461,25 @@ private fun SynkaAppShell(engine: SynkaEngine) {
                             )
                         }
                         SynkaTab.LOCAL_MEDIA -> {
-                            LocalMediaPlaceholderBox(
+                            LocalMediaScreen(
                                 engine = engine,
-                                onPickVisual = { visualMediaPicker.launch(arrayOf("image/*", "video/*")) },
-                                onPickAudio = { audioMediaPicker.launch(arrayOf("audio/*")) },
-                                onJumpHome = { activeTab = SynkaTab.HOME }
+                                onVideoLoaded = { uri ->
+                                    syncGenreHighlightsForFileBinding(uri)
+                                    activeTab = SynkaTab.DISPLAY_EQ
+                                },
+                                onAudioLoaded = { uri, jumpToAudioStudio ->
+                                    syncGenreHighlightsForFileBinding(uri)
+                                    if (jumpToAudioStudio) {
+                                        activeTab = SynkaTab.AUDIO_EQ
+                                    }
+                                },
+                                onPickVisualSaf = {
+                                    jumpToDisplayStudioAfterSaf = true
+                                    visualMediaPicker.launch(arrayOf("video/*", "image/*"))
+                                },
+                                onPickAudioSaf = {
+                                    audioMediaPicker.launch(arrayOf("audio/*"))
+                                }
                             )
                         }
                     }
@@ -517,6 +551,7 @@ private fun SynkaAppShell(engine: SynkaEngine) {
                         }
                     },
                     onEditVisualMedia = {
+                        jumpToDisplayStudioAfterSaf = false
                         visualMediaPicker.launch(arrayOf("image/*", "video/*"))
                     },
                     onEditAudioMedia = {
@@ -771,104 +806,6 @@ private fun PersistentBottomDock(
                     fontWeight = if (mediaSelected) FontWeight.Bold else FontWeight.Medium,
                     color = if (mediaSelected) colors.activeAccentStrong else colors.primaryText
                 )
-            }
-        }
-    }
-}
-
-// -----------------------------------------------------------------------------
-// Placeholder Box for Chunk 13 (Local Media Library & Per-File Bindings)
-// -----------------------------------------------------------------------------
-
-@Composable
-private fun LocalMediaPlaceholderBox(
-    engine: SynkaEngine,
-    onPickVisual: () -> Unit,
-    onPickAudio: () -> Unit,
-    onJumpHome: () -> Unit
-) {
-    val colors = LocalSynkaColors.current
-
-    Box(
-        modifier = Modifier
-            .fillMaxSize()
-            .padding(20.dp),
-        contentAlignment = Alignment.Center
-    ) {
-        Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .clip(RoundedCornerShape(18.dp))
-                .background(colors.surface)
-                .border(1.dp, colors.hairline, RoundedCornerShape(18.dp))
-                .padding(20.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp)
-        ) {
-            Text(
-                text = "Local Media",
-                style = MaterialTheme.typography.headlineSmall,
-                color = colors.primaryText
-            )
-            Text(
-                text = "Placeholder for Chunk 13 • Media Library & Per-File Preset Bindings. Use the quick pickers below to test live preview and the persistent Mini-Player now.",
-                style = MaterialTheme.typography.bodySmall,
-                color = colors.secondaryText
-            )
-            Text(
-                text = "Visual: ${engine.visualUri?.lastPathSegment ?: "Built-in Calibration Chart"}",
-                style = MaterialTheme.typography.labelSmall,
-                color = colors.activeAccent,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis
-            )
-            Text(
-                text = "Audio: ${engine.audioTitle.ifBlank { "None loaded" }}",
-                style = MaterialTheme.typography.labelSmall,
-                color = colors.secondaryText,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis
-            )
-
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(10.dp)
-            ) {
-                Box(
-                    modifier = Modifier
-                        .weight(1f)
-                        .clip(RoundedCornerShape(12.dp))
-                        .background(colors.elevatedSurface)
-                        .border(1.dp, colors.hairline, RoundedCornerShape(12.dp))
-                        .clickable {
-                            onPickVisual()
-                            onJumpHome()
-                        }
-                        .padding(vertical = 11.dp),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Text(
-                        text = "Pick Photo / Video",
-                        style = MaterialTheme.typography.labelMedium,
-                        color = colors.primaryText
-                    )
-                }
-
-                Box(
-                    modifier = Modifier
-                        .weight(1f)
-                        .clip(RoundedCornerShape(12.dp))
-                        .background(colors.elevatedSurface)
-                        .border(1.dp, colors.hairline, RoundedCornerShape(12.dp))
-                        .clickable(onClick = onPickAudio)
-                        .padding(vertical = 11.dp),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Text(
-                        text = "Pick Audio",
-                        style = MaterialTheme.typography.labelMedium,
-                        color = colors.primaryText
-                    )
-                }
             }
         }
     }
