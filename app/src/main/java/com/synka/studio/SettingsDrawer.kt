@@ -6,6 +6,7 @@ import android.content.Context
 import android.content.Intent
 import android.media.AudioManager
 import android.os.Build
+import android.provider.Settings
 import android.widget.Toast
 import androidx.annotation.OptIn
 import androidx.compose.foundation.background
@@ -32,6 +33,7 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -72,6 +74,10 @@ fun SettingsDrawerSheet(
     var showCrashLogDialog by remember { mutableStateOf(false) }
     var showClearStorageDialog by remember { mutableStateOf(false) }
 
+    LaunchedEffect(Unit) {
+        SynkaColorService.refreshPermissions(context)
+    }
+
     val deviceSampleRateLabel = remember(
         engine.isAudioPlaying,
         engine.audioUri,
@@ -101,7 +107,6 @@ fun SettingsDrawerSheet(
                 .padding(horizontal = 18.dp, vertical = 16.dp),
             verticalArrangement = Arrangement.spacedBy(14.dp)
         ) {
-            // Drawer Header
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
@@ -114,7 +119,7 @@ fun SettingsDrawerSheet(
                         color = colors.primaryText
                     )
                     Text(
-                        text = "SETTINGS & DIAGNOSTICS",
+                        text = "SETTINGS & SYSTEM ENGINE",
                         style = MaterialTheme.typography.labelSmall,
                         color = colors.activeAccent
                     )
@@ -138,7 +143,70 @@ fun SettingsDrawerSheet(
 
             HorizontalDivider(thickness = 1.dp, color = colors.hairline)
 
-            // 1. Theme Switch (Studio Reference vs Artisan Edition)
+            // System-Wide Engine Status & Optional Hardware B&W ADB Command
+            Text(
+                text = "SYSTEM-WIDE ENGINE (ALL APPS)",
+                style = MaterialTheme.typography.labelSmall,
+                color = colors.secondaryText
+            )
+
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                DrawerActionRow(
+                    title = "Screen Filter (Accessibility)",
+                    subtitle = SynkaColorService.statusSummary,
+                    accentHighlight = SynkaColorService.isServiceBound && SynkaColorService.isSystemColorEnabled,
+                    onClick = {
+                        if (!SynkaColorService.isServiceBound) {
+                            runCatching {
+                                context.startActivity(
+                                    Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)
+                                        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                                )
+                            }
+                        } else {
+                            SynkaColorService.updateFromEngine(context, engine.activeArka, engine.isMasterEnabled)
+                            SynkaColorService.setEnabled(context, !SynkaColorService.isSystemColorEnabled)
+                        }
+                    }
+                )
+
+                DrawerActionRow(
+                    title = "System Audio EQ (DynamicsProcessing)",
+                    subtitle = SvaraGlobalService.statusSummary,
+                    accentHighlight = SvaraGlobalService.isRunning,
+                    onClick = {
+                        if (SvaraGlobalService.isRunning) {
+                            SvaraGlobalService.stop(context)
+                        } else {
+                            SvaraGlobalService.start(context)
+                            SvaraGlobalService.updateFromEngine(
+                                context,
+                                engine.activeSvara,
+                                engine.isMasterEnabled,
+                                engine.isAudioPlaying
+                            )
+                        }
+                    }
+                )
+
+                val hasSecure = SynkaColorService.hasSecureSettingsGrant
+                DrawerActionRow(
+                    title = if (hasSecure) "Hardware B&W Ready (Granted)" else "Optional: Copy ADB Command for System B&W",
+                    subtitle = if (hasSecure) {
+                        "WRITE_SECURE_SETTINGS active for global Monochrome"
+                    } else {
+                        "pm grant com.synka.studio android.permission.WRITE_SECURE_SETTINGS"
+                    },
+                    onClick = {
+                        val cmd = "adb shell pm grant ${context.packageName} android.permission.WRITE_SECURE_SETTINGS"
+                        copyToClipboard(context, "Synka ADB Command", cmd)
+                        Toast.makeText(context, "Copied ADB command", Toast.LENGTH_SHORT).show()
+                    }
+                )
+            }
+
+            HorizontalDivider(thickness = 1.dp, color = colors.hairline)
+
             Text(
                 text = "THEME EDITION",
                 style = MaterialTheme.typography.labelSmall,
@@ -163,7 +231,6 @@ fun SettingsDrawerSheet(
 
             HorizontalDivider(thickness = 1.dp, color = colors.hairline)
 
-            // 2. Preset Tools & Maintenance
             Text(
                 text = "PRESETS & MAINTENANCE",
                 style = MaterialTheme.typography.labelSmall,
@@ -200,9 +267,8 @@ fun SettingsDrawerSheet(
 
             HorizontalDivider(thickness = 1.dp, color = colors.hairline)
 
-            // 3. Honest v1 Engine Diagnostics
             Text(
-                text = "v1 ENGINE DIAGNOSTICS",
+                text = "ENGINE DIAGNOSTICS",
                 style = MaterialTheme.typography.labelSmall,
                 color = colors.secondaryText
             )
@@ -219,31 +285,11 @@ fun SettingsDrawerSheet(
                 DiagnosticRow("Android API", "API ${Build.VERSION.SDK_INT} (Android ${Build.VERSION.RELEASE})")
                 DiagnosticRow("Device", "${Build.MANUFACTURER} ${Build.MODEL}")
                 DiagnosticRow("AGSL Shader", agslStatusLabel)
+                DiagnosticRow("Local Svara DSP", "${engine.svaraAudio.activeEncodingLabel()} @ ${engine.svaraAudio.activeSampleRate} Hz")
                 DiagnosticRow("Media3 Version", MediaLibraryInfo.VERSION)
-                DiagnosticRow("Audio Sample Rate", deviceSampleRateLabel)
-                DiagnosticRow(
-                    "Svara DSP",
-                    if (engine.isMasterEnabled) "12-stage TDF-II Active" else "Bypassed"
-                )
-
-                HorizontalDivider(
-                    modifier = Modifier.padding(vertical = 4.dp),
-                    thickness = 1.dp,
-                    color = colors.hairline
-                )
-
-                Text(
-                    text = "v2 TV ROADMAP",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = colors.activeAccent
-                )
-                Text(
-                    text = "v1 operates honestly as a local media sandbox with zero root or DRM bypass. v2 plans companion Smart TV calibration console sync and external display profiles where OS boundaries permit.",
-                    style = MaterialTheme.typography.bodySmall,
-                    fontSize = 11.sp,
-                    lineHeight = 15.sp,
-                    color = colors.secondaryText
-                )
+                DiagnosticRow("Device Sample Rate", deviceSampleRateLabel)
+                DiagnosticRow("System Screen", SynkaColorService.statusSummary)
+                DiagnosticRow("System Audio", SvaraGlobalService.statusSummary)
             }
 
             Spacer(modifier = Modifier.height(8.dp))
@@ -275,10 +321,6 @@ fun SettingsDrawerSheet(
     }
 }
 
-// -----------------------------------------------------------------------------
-// Share / Import Preset Code Dialog
-// -----------------------------------------------------------------------------
-
 @Composable
 private fun ShareImportPresetDialog(
     engine: SynkaEngine,
@@ -288,9 +330,8 @@ private fun ShareImportPresetDialog(
     val context = LocalContext.current
     val colors = LocalSynkaColors.current
 
-    var selectedTab by remember { mutableIntStateOf(0) } // 0 = Export, 1 = Import
+    var selectedTab by remember { mutableIntStateOf(0) }
 
-    // Build export candidates: Current Live State + User Presets + Built-ins
     val currentLivePreset = remember(engine.activeArka, engine.activeSvara, engine.activePresetId) {
         val baseName = engine.findPresetById(engine.activePresetId)?.name ?: "Current Studio Grade"
         SynkaPreset(
@@ -346,7 +387,6 @@ private fun ShareImportPresetDialog(
                 .padding(18.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
-            // Header
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
@@ -366,7 +406,6 @@ private fun ShareImportPresetDialog(
                 )
             }
 
-            // Export / Import Segmented Tabs
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -401,7 +440,6 @@ private fun ShareImportPresetDialog(
             }
 
             if (selectedTab == 0) {
-                // EXPORT TAB
                 Text(
                     text = "SELECT PRESET (${engine.userPresets.size} custom)",
                     style = MaterialTheme.typography.labelSmall,
@@ -484,7 +522,6 @@ private fun ShareImportPresetDialog(
                     }
                 }
 
-                // Encoded Output Box
                 Column(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -577,7 +614,6 @@ private fun ShareImportPresetDialog(
                     }
                 }
             } else {
-                // IMPORT TAB
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.SpaceBetween,
@@ -652,7 +688,6 @@ private fun ShareImportPresetDialog(
                     shape = RoundedCornerShape(10.dp)
                 )
 
-                // Live decode preview or error
                 decodedResult?.let { result ->
                     result.onSuccess { decoded ->
                         Column(
@@ -745,10 +780,6 @@ private fun ShareImportPresetDialog(
         }
     }
 }
-
-// -----------------------------------------------------------------------------
-// Crash Log Viewer Dialog (filesDir/last_crash.txt)
-// -----------------------------------------------------------------------------
 
 @Composable
 private fun CrashLogViewerDialog(onDismiss: () -> Unit) {
@@ -879,7 +910,7 @@ private fun CrashLogViewerDialog(onDismiss: () -> Unit) {
                                 RoundedCornerShape(10.dp)
                             )
                             .clickable {
-                                throw RuntimeException("Synka Test Gate 12: Simulated uncaught exception")
+                                throw RuntimeException("Synka Crash Catcher Test")
                             }
                             .padding(vertical = 10.dp),
                         contentAlignment = Alignment.Center
@@ -896,10 +927,6 @@ private fun CrashLogViewerDialog(onDismiss: () -> Unit) {
         }
     }
 }
-
-// -----------------------------------------------------------------------------
-// Clear Saved Presets / Cache Confirmation Dialog
-// -----------------------------------------------------------------------------
 
 @Composable
 private fun ClearStorageDialog(
@@ -1010,10 +1037,6 @@ private fun ClearStorageDialog(
         }
     }
 }
-
-// -----------------------------------------------------------------------------
-// Reusable Drawer Building Blocks & Helpers
-// -----------------------------------------------------------------------------
 
 @Composable
 private fun ThemeOptionCard(
@@ -1150,7 +1173,10 @@ private fun resolveImportId(candidateId: String, engine: SynkaEngine): String {
         clean == "live_snapshot" ||
         SynkaBuiltInPresets.ALL_PRESETS.any { it.id == clean }
     val collidesWithUser = engine.userPresets.any { it.id == clean }
-    return if (clean.isBlank() || collidesWithBuiltIn || collidesWithUser) {
+    return if (clean.isBlank() |
+
+| collidesWithBuiltIn |
+| collidesWithUser) {
         "user_${UUID.randomUUID()}"
     } else {
         clean
@@ -1159,7 +1185,12 @@ private fun resolveImportId(candidateId: String, engine: SynkaEngine): String {
 
 private fun summarizePresetValues(preset: SynkaPreset): String {
     val activeHslCount = preset.arka.bands.count {
-        it.sat != 0f || it.hue != 0f || it.lum != 0f || it.solo || it.mute
+        it.sat != 0f |
+
+| it.hue != 0f |
+| it.lum != 0f |
+| it.solo |
+| it.mute
     }
     val activeEqCount = preset.svara.bands.count { it.gainDb != 0f }
     val preSign = if (preset.svara.preAmpDb >= 0f) "+" else ""
@@ -1184,7 +1215,9 @@ private fun readFromClipboard(context: Context): String? {
 }
 
 private fun computeDirectoryBytes(dir: File?): Long {
-    if (dir == null || !dir.exists()) return 0L
+    if (dir == null |
+
+| !dir.exists()) return 0L
     var total = 0L
     dir.walkTopDown().forEach { file ->
         if (file.isFile) total += file.length()
