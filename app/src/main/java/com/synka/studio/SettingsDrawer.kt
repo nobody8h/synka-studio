@@ -143,7 +143,6 @@ fun SettingsDrawerSheet(
 
             HorizontalDivider(thickness = 1.dp, color = colors.hairline)
 
-            // System-Wide Engine Status & Optional Hardware B&W ADB Command
             Text(
                 text = "SYSTEM-WIDE ENGINE (ALL APPS)",
                 style = MaterialTheme.typography.labelSmall,
@@ -1169,28 +1168,31 @@ private fun resolveAudioSampleRateLabel(context: Context, engine: SynkaEngine): 
 
 private fun resolveImportId(candidateId: String, engine: SynkaEngine): String {
     val clean = candidateId.trim()
-    val collidesWithBuiltIn = clean.startsWith("builtin_") ||
-        clean == "live_snapshot" ||
-        SynkaBuiltInPresets.ALL_PRESETS.any { it.id == clean }
+    val collidesWithBuiltIn = when {
+        clean.startsWith("builtin_") -> true
+        clean == "live_snapshot" -> true
+        SynkaBuiltInPresets.ALL_PRESETS.any { it.id == clean } -> true
+        else -> false
+    }
     val collidesWithUser = engine.userPresets.any { it.id == clean }
-    return if (clean.isBlank() |
-
-| collidesWithBuiltIn |
-| collidesWithUser) {
-        "user_${UUID.randomUUID()}"
-    } else {
-        clean
+    return when {
+        clean.isBlank() -> "user_${UUID.randomUUID()}"
+        collidesWithBuiltIn -> "user_${UUID.randomUUID()}"
+        collidesWithUser -> "user_${UUID.randomUUID()}"
+        else -> clean
     }
 }
 
 private fun summarizePresetValues(preset: SynkaPreset): String {
-    val activeHslCount = preset.arka.bands.count {
-        it.sat != 0f |
-
-| it.hue != 0f |
-| it.lum != 0f |
-| it.solo |
-| it.mute
+    val activeHslCount = preset.arka.bands.count { b ->
+        when {
+            b.sat != 0f -> true
+            b.hue != 0f -> true
+            b.lum != 0f -> true
+            b.solo -> true
+            b.mute -> true
+            else -> false
+        }
     }
     val activeEqCount = preset.svara.bands.count { it.gainDb != 0f }
     val preSign = if (preset.svara.preAmpDb >= 0f) "+" else ""
@@ -1215,9 +1217,8 @@ private fun readFromClipboard(context: Context): String? {
 }
 
 private fun computeDirectoryBytes(dir: File?): Long {
-    if (dir == null |
-
-| !dir.exists()) return 0L
+    if (dir == null) return 0L
+    if (!dir.exists()) return 0L
     var total = 0L
     dir.walkTopDown().forEach { file ->
         if (file.isFile) total += file.length()
