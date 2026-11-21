@@ -63,7 +63,6 @@ import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.StrokeJoin
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.input.pointer.pointerInput
-import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
@@ -78,6 +77,7 @@ fun HomeScreen(
     engine: SynkaEngine,
     activeDisplayGenre: DisplayGenre?,
     activeAudioGenre: AudioGenre?,
+    isPreviewActive: Boolean = true,
     onDiscoverClick: () -> Unit,
     onOpenDrawer: () -> Unit,
     onPickVisualMedia: () -> Unit,
@@ -112,6 +112,7 @@ fun HomeScreen(
 
         LivePreviewCard(
             engine = engine,
+            isPreviewActive = isPreviewActive,
             onPickVisualMedia = onPickVisualMedia,
             onPickAudioMedia = onPickAudioMedia
         )
@@ -162,7 +163,6 @@ private fun HomeTopBar(
             onToggle = onToggleMaster
         )
 
-        // Center Discover Pill
         Row(
             modifier = Modifier
                 .clip(RoundedCornerShape(50))
@@ -184,7 +184,6 @@ private fun HomeTopBar(
             )
         }
 
-        // Right Hamburger Menu Button
         Box(
             modifier = Modifier
                 .size(40.dp)
@@ -413,6 +412,7 @@ private fun UnlockRoadmapDialog(onDismiss: () -> Unit) {
 @Composable
 private fun LivePreviewCard(
     engine: SynkaEngine,
+    isPreviewActive: Boolean,
     onPickVisualMedia: () -> Unit,
     onPickAudioMedia: () -> Unit
 ) {
@@ -432,20 +432,24 @@ private fun LivePreviewCard(
         }
     }
 
-    // Bind / unbind active Android Views to SynkaEngine cleanly across screen switches
-    DisposableEffect(engine, textureViewRef, imageViewRef) {
+    // Rebind Home views whenever Home owns the active visual preview surface
+    LaunchedEffect(engine, textureViewRef, imageViewRef, isPreviewActive) {
         val tv = textureViewRef
         val iv = imageViewRef
-        if (tv != null && iv != null) {
+        if (isPreviewActive && tv != null && iv != null) {
             engine.bindVisualTarget(tv, iv)
         }
+    }
+
+    // Unbind when HomeScreen leaves composition (tab switch / destroy)
+    DisposableEffect(engine) {
         onDispose {
             engine.bindVisualTarget(null, null)
         }
     }
 
     // Manage TextureView vs ImageView visibility & procedural fallback bitmap
-    LaunchedEffect(engine.visualUri, engine.visualIsVideo, textureViewRef, imageViewRef) {
+    LaunchedEffect(engine.visualUri, engine.visualIsVideo, isPreviewActive, textureViewRef, imageViewRef) {
         val tv = textureViewRef
         val iv = imageViewRef
         if (tv != null && iv != null) {
@@ -464,6 +468,7 @@ private fun LivePreviewCard(
 
     // Apply live shader or instant Before/After bypass while held
     LaunchedEffect(
+        isPreviewActive,
         isHoldingBeforeAfter,
         engine.isMasterEnabled,
         engine.activeArka,
@@ -472,6 +477,7 @@ private fun LivePreviewCard(
         textureViewRef,
         imageViewRef
     ) {
+        if (!isPreviewActive) return@LaunchedEffect
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             val bypass = isHoldingBeforeAfter || !engine.isMasterEnabled
             val activeView: View? = if (engine.visualUri != null && engine.visualIsVideo) {
@@ -584,7 +590,6 @@ private fun LivePreviewCard(
                 }
             )
 
-            // Top-left live status badge
             val badgeText = when {
                 isHoldingBeforeAfter -> "BEFORE • ORIGINAL"
                 !engine.isMasterEnabled -> "BYPASS • OFF"
@@ -614,7 +619,6 @@ private fun LivePreviewCard(
                 )
             }
 
-            // Bottom-left subtle hint for Before/After long-press
             if (!isHoldingBeforeAfter) {
                 Text(
                     text = "Hold for Before/After",
@@ -626,7 +630,6 @@ private fun LivePreviewCard(
                 )
             }
 
-            // Bottom-right Pick Media quick chip
             Box(
                 modifier = Modifier
                     .align(Alignment.BottomEnd)
@@ -648,7 +651,6 @@ private fun LivePreviewCard(
 
         HorizontalDivider(thickness = 1.dp, color = colors.hairline)
 
-        // Compact Audio Status Bar inside Preview Card
         CompactAudioStatusBar(
             engine = engine,
             onPickAudioMedia = onPickAudioMedia
@@ -697,7 +699,6 @@ private fun CompactAudioStatusBar(
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(10.dp)
     ) {
-        // Status indicator dot
         Box(
             modifier = Modifier
                 .size(7.dp)
@@ -738,7 +739,6 @@ private fun CompactAudioStatusBar(
             )
         }
 
-        // Compact 12-bar live pulse indicator
         Canvas(
             modifier = Modifier
                 .width(44.dp)
@@ -866,7 +866,6 @@ private fun GenreDeckSection(
             }
         }
 
-        // Centered [ both 🔗 ] link pill between Display Mode and For Audio rows
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -1011,33 +1010,32 @@ private fun GenreDeckCard(
 }
 
 // -----------------------------------------------------------------------------
-// Neutral Procedural Color-Gradient Test Pattern Bitmap (for empty visual state)
+// Neutral Procedural Color-Gradient Test Pattern Bitmap (shared with PresetSheet)
 // -----------------------------------------------------------------------------
 
-private fun createCalibrationTestPatternBitmap(width: Int, height: Int): Bitmap {
+internal fun createCalibrationTestPatternBitmap(width: Int, height: Int): Bitmap {
     val bmp = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
     val canvas = AndroidCanvas(bmp)
     val paint = Paint(Paint.ANTI_ALIAS_FLAG)
 
-    // Neutral matte dark background (#141416)
     canvas.drawColor(AndroidColor.rgb(20, 20, 22))
 
     val padX = width * 0.06f
     val usableW = width - padX * 2f
 
-    // 1. Continuous 8-band HSL Hue Spectrum Gradient (top band)
+    // 1. Continuous 8-band HSL Hue Spectrum Gradient
     val spectrumTop = height * 0.14f
     val spectrumBottom = height * 0.44f
     val hueColors = intArrayOf(
-        AndroidColor.rgb(230, 57, 70),   // Red
-        AndroidColor.rgb(235, 132, 46),  // Orange
-        AndroidColor.rgb(232, 204, 58),  // Yellow
-        AndroidColor.rgb(66, 184, 96),   // Green
-        AndroidColor.rgb(52, 188, 196),  // Cyan
-        AndroidColor.rgb(64, 120, 224),  // Blue
-        AndroidColor.rgb(138, 86, 214),  // Purple
-        AndroidColor.rgb(214, 72, 166),  // Magenta
-        AndroidColor.rgb(230, 57, 70)    // Red wrap
+        AndroidColor.rgb(230, 57, 70),
+        AndroidColor.rgb(235, 132, 46),
+        AndroidColor.rgb(232, 204, 58),
+        AndroidColor.rgb(66, 184, 96),
+        AndroidColor.rgb(52, 188, 196),
+        AndroidColor.rgb(64, 120, 224),
+        AndroidColor.rgb(138, 86, 214),
+        AndroidColor.rgb(214, 72, 166),
+        AndroidColor.rgb(230, 57, 70)
     )
     paint.shader = LinearGradient(
         padX,
@@ -1051,7 +1049,7 @@ private fun createCalibrationTestPatternBitmap(width: Int, height: Int): Bitmap 
     canvas.drawRoundRect(padX, spectrumTop, padX + usableW, spectrumBottom, 16f, 16f, paint)
     paint.shader = null
 
-    // 2. Five Reference Swatches (Crimson, Warm Skin, Mid Gray 18%, Foliage, Sky)
+    // 2. Five Reference Swatches
     val swatchTop = height * 0.50f
     val swatchBottom = height * 0.67f
     val swatches = intArrayOf(
@@ -1069,7 +1067,7 @@ private fun createCalibrationTestPatternBitmap(width: Int, height: Int): Bitmap 
         canvas.drawRoundRect(left, swatchTop, left + swatchW, swatchBottom, 12f, 12f, paint)
     }
 
-    // 3. 11-Step Neutral Grayscale Luminance Ramp (Blacks -> Shadows -> Mids -> Highlights -> Whites)
+    // 3. 11-Step Neutral Grayscale Luminance Ramp
     val rampTop = height * 0.73f
     val rampBottom = height * 0.86f
     val steps = 11
@@ -1081,7 +1079,6 @@ private fun createCalibrationTestPatternBitmap(width: Int, height: Int): Bitmap 
         canvas.drawRect(left, rampTop, left + stepW + 0.5f, rampBottom, paint)
     }
 
-    // Hairline border around grayscale ramp
     paint.style = Paint.Style.STROKE
     paint.strokeWidth = 2f
     paint.color = AndroidColor.argb(45, 255, 255, 255)
@@ -1091,7 +1088,7 @@ private fun createCalibrationTestPatternBitmap(width: Int, height: Int): Bitmap 
 }
 
 // -----------------------------------------------------------------------------
-// Crisp Minimal Studio Vector Glyphs (zero icon-library dependency risk)
+// Crisp Minimal Studio Vector Glyphs
 // -----------------------------------------------------------------------------
 
 @Composable
