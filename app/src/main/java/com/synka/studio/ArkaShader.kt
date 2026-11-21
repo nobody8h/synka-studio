@@ -8,10 +8,10 @@ import androidx.annotation.RequiresApi
 
 object ArkaShader {
 
-    private const val INPUT_SHADER_NAME = "input"
+    private const val INPUT_SHADER_NAME = "inputShader"
 
     private const val AGSL_SOURCE = """
-        uniform shader input;
+        uniform shader inputShader;
 
         // Effective per-band saturation multipliers (solo + mute pre-resolved on CPU)
         // A = [RED, ORANGE, YELLOW, GREEN], B = [CYAN, BLUE, PURPLE, MAGENTA]
@@ -104,7 +104,7 @@ object ArkaShader {
 
         half4 main(float2 coords) {
             // 1. Safe un-premultiply in 32-bit float (avoids fp16 FTZ subnormal underflow)
-            half4 c = input.eval(coords);
+            half4 c = inputShader.eval(coords);
             float a = clamp(float(c.a), 0.0, 1.0);
             float3 rgb = clamp(float3(c.rgb) / max(a, 0.0001), 0.0, 1.0);
 
