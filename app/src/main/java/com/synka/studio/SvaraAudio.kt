@@ -8,6 +8,7 @@ import androidx.media3.common.audio.BaseAudioProcessor
 import androidx.media3.common.util.UnstableApi
 import java.nio.ByteBuffer
 import java.util.concurrent.atomic.AtomicIntegerArray
+import java.util.concurrent.atomic.AtomicLong
 import kotlin.math.PI
 import kotlin.math.abs
 import kotlin.math.cos
@@ -57,6 +58,8 @@ class SvaraAudio : BaseAudioProcessor() {
 
     fun activeEncodingLabel(): String = encodingLabel
 
+    val processedBufferCount: AtomicLong = AtomicLong(0L)
+
     @Volatile
     private var latestParams: SvaraParams = SvaraParams()
 
@@ -75,6 +78,7 @@ class SvaraAudio : BaseAudioProcessor() {
     private var dialogueEnvelope: Float = 0.05f
     private val waveformBits = AtomicIntegerArray(WAVEFORM_BARS)
     private val frameBarPeaks = FloatArray(WAVEFORM_BARS)
+    private val frameSamples = FloatArray(MAX_CHANNELS)
 
     fun updateParams(params: SvaraParams, bypassed: Boolean = false) {
         val normalized = params.normalized()
@@ -162,8 +166,6 @@ class SvaraAudio : BaseAudioProcessor() {
         val srF = activeSnap.sampleRate.toFloat().coerceAtLeast(8_000f)
         val attackCoeff = 1f - kotlin.math.exp(-1f / (0.012f * srF))
         val releaseCoeff = 1f - kotlin.math.exp(-1f / (0.180f * srF))
-
-        val frameSamples = FloatArray(channels)
 
         for (frame in 0 until frameCount) {
             for (ch in 0 until channels) {
@@ -264,6 +266,7 @@ class SvaraAudio : BaseAudioProcessor() {
             waveformBits.set(i, smoothed.toBits())
         }
 
+        processedBufferCount.incrementAndGet()
         inputBuffer.position(limit)
         outBuffer.flip()
     }
