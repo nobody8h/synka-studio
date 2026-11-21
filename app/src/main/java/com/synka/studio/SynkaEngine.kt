@@ -74,10 +74,12 @@ class SynkaEngine(context: Context) {
 
     var isMasterEnabled: Boolean
         get() = _isMasterEnabled.value
+        @JvmName("assignMasterEnabled")
         set(value) = setMasterEnabled(value)
 
     var isLinkedBoth: Boolean
         get() = _isLinkedBoth.value
+        @JvmName("assignLinkedBoth")
         set(value) = setLinkedBoth(value)
 
     var activeArka: ArkaParams
@@ -90,6 +92,7 @@ class SynkaEngine(context: Context) {
 
     var themeMode: SynkaThemeMode
         get() = _themeMode.value
+        @JvmName("assignThemeMode")
         set(value) = setThemeMode(value)
 
     var activePresetId: String? by mutableStateOf(SynkaBuiltInPresets.KORA.id)
@@ -343,7 +346,6 @@ class SynkaEngine(context: Context) {
                 exoPlayer.playWhenReady = true
                 syncPlaybackTelemetry()
             } else {
-                // Still image renders in ImageView without disrupting audio playback on ExoPlayer
                 if (textureView != null && !playerCurrentlyVideo) {
                     clearShaderSafely(textureView)
                 }
@@ -380,7 +382,6 @@ class SynkaEngine(context: Context) {
 
             applyBoundPresetsForUri(uri)
 
-            // Detach video surface if switching from a video stream to standalone audio
             if (playerCurrentlyVideo) {
                 boundTextureViewRef?.get()?.let { exoPlayer.clearVideoTextureView(it) }
                 playerCurrentlyVideo = false
