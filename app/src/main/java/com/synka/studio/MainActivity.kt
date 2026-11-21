@@ -10,6 +10,7 @@ import android.os.Bundle
 import android.os.Process
 import android.widget.Toast
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
@@ -39,11 +40,14 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
+import androidx.compose.material3.DrawerValue
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.ModalNavigationDrawer
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.rememberDrawerState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -51,6 +55,7 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -71,6 +76,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import java.io.File
 import java.io.PrintWriter
 import java.io.StringWriter
@@ -189,23 +195,27 @@ class MainActivity : ComponentActivity() {
 }
 
 // -----------------------------------------------------------------------------
-// Main Shell: Content Stage + Persistent Mini-Player + Bottom Dock + PresetSheet
+// Main Shell: ModalNavigationDrawer + Stage + Mini-Player + Bottom Dock + Sheet
 // -----------------------------------------------------------------------------
 
 @Composable
 private fun SynkaAppShell(engine: SynkaEngine) {
     val context = LocalContext.current
     val colors = LocalSynkaColors.current
+    val scope = rememberCoroutineScope()
 
     var activeTab by remember { mutableStateOf(SynkaTab.HOME) }
-    var isDrawerOpen by remember { mutableStateOf(false) }
-    var isDiscoverOpen by remember { mutableStateOf(false) }
+    val drawerState = rememberDrawerState(initialValue = DrawerValue.Closed)
     var activePresetSheet by remember { mutableStateOf<PresetSheetStateModel?>(null) }
 
     // Independent Display/Audio genre highlights and last-used preset memory per genre
     var activeDisplayGenre by remember { mutableStateOf<DisplayGenre?>(null) }
     var activeAudioGenre by remember { mutableStateOf<AudioGenre?>(null) }
     val lastUsedPresetByGenre = remember { mutableStateMapOf<String, String>() }
+
+    BackHandler(enabled = drawerState.isOpen) {
+        scope.launch { drawerState.close() }
+    }
 
     fun takeReadPermission(uri: Uri) {
         runCatching {
@@ -276,6 +286,22 @@ private fun SynkaAppShell(engine: SynkaEngine) {
         }
     }
 
+    fun syncGenreHighlightsForPreset(preset: SynkaPreset) {
+        if (preset.id == SynkaBuiltInPresets.KORA.id) {
+            activeDisplayGenre = null
+            activeAudioGenre = null
+            return
+        }
+        preset.displayGenre?.let { genre ->
+            activeDisplayGenre = genre
+            lastUsedPresetByGenre["${PresetDomain.DISPLAY.name}:${genre.name}"] = preset.id
+        }
+        preset.audioGenre?.let { genre ->
+            activeAudioGenre = genre
+            lastUsedPresetByGenre["${PresetDomain.AUDIO.name}:${genre.name}"] = preset.id
+        }
+    }
+
     val isAudioLoaded = engine.audioUri != null || (engine.visualUri != null && engine.visualIsVideo)
     val isPresetSheetShowingVisual = activePresetSheet != null && activePresetSheet?.domain != PresetDomain.AUDIO
 
@@ -293,207 +319,214 @@ private fun SynkaAppShell(engine: SynkaEngine) {
         Modifier
     }
 
-    Box(
-        modifier = Modifier
-            .fillMaxSize()
-            .background(colors.background)
-    ) {
-        Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .then(backdropBlurModifier)
-                .statusBarsPadding()
-        ) {
-            Box(
-                modifier = Modifier
-                    .weight(1f)
-                    .fillMaxWidth()
-            ) {
-                when (activeTab) {
-                    SynkaTab.HOME -> {
-                        HomeScreen(
-                            engine = engine,
-                            activeDisplayGenre = activeDisplayGenre,
-                            activeAudioGenre = activeAudioGenre,
-                            isPreviewActive = !isPresetSheetShowingVisual,
-                            onDiscoverClick = { isDiscoverOpen = true },
-                            onOpenDrawer = { isDrawerOpen = true },
-                            onPickVisualMedia = {
-                                visualMediaPicker.launch(arrayOf("image/*", "video/*"))
-                            },
-                            onPickAudioMedia = {
-                                audioMediaPicker.launch(arrayOf("audio/*"))
-                            },
-                            onDisplayGenreTap = { genre -> applyDisplayGenreFromDeck(genre) },
-                            onAudioGenreTap = { genre -> applyAudioGenreFromDeck(genre) },
-                            onOpenPresetSheet = { domain, genreName ->
-                                val resolvedDisplay = if (domain == PresetDomain.DISPLAY) {
-                                    DisplayGenre.entries.firstOrNull { it.name == genreName }
-                                        ?: activeDisplayGenre
-                                        ?: DisplayGenre.CINEMA_GRADE
-                                } else {
-                                    activeDisplayGenre ?: DisplayGenre.CINEMA_GRADE
-                                }
-                                val resolvedAudio = if (domain == PresetDomain.AUDIO) {
-                                    AudioGenre.entries.firstOrNull { it.name == genreName }
-                                        ?: activeAudioGenre
-                                        ?: AudioGenre.BASS
-                                } else {
-                                    activeAudioGenre ?: AudioGenre.BASS
-                                }
-                                activePresetSheet = PresetSheetStateModel(
-                                    domain = domain,
-                                    displayGenre = resolvedDisplay,
-                                    audioGenre = resolvedAudio
-                                )
-                            }
-                        )
-                    }
-                    SynkaTab.DISPLAY_EQ -> {
-                        ArkaStudio(
-                            engine = engine,
-                            activeDisplayGenre = activeDisplayGenre,
-                            isPreviewActive = !isPresetSheetShowingVisual,
-                            onEditVisualMedia = {
-                                visualMediaPicker.launch(arrayOf("image/*", "video/*"))
-                            },
-                            onResetToKora = {
-                                engine.resetToKora()
-                                activeDisplayGenre = null
-                                activeAudioGenre = null
-                            },
-                            onPresetSaved = { saved ->
-                                saved.displayGenre?.let { genre ->
-                                    activeDisplayGenre = genre
-                                    lastUsedPresetByGenre["${PresetDomain.DISPLAY.name}:${genre.name}"] = saved.id
-                                }
-                            }
-                        )
-                    }
-                    SynkaTab.AUDIO_EQ -> {
-                        SvaraStudio(
-                            engine = engine,
-                            activeAudioGenre = activeAudioGenre,
-                            onEditAudioMedia = {
-                                audioMediaPicker.launch(arrayOf("audio/*"))
-                            },
-                            onResetAudioToFlat = {
-                                engine.applyPreset(SynkaBuiltInPresets.AUDIO_STUDIO_FLAT)
-                                activeAudioGenre = AudioGenre.FLAT
-                            },
-                            onPresetSaved = { saved ->
-                                saved.audioGenre?.let { genre ->
-                                    activeAudioGenre = genre
-                                    lastUsedPresetByGenre["${PresetDomain.AUDIO.name}:${genre.name}"] = saved.id
-                                }
-                            }
-                        )
-                    }
-                    SynkaTab.LOCAL_MEDIA -> {
-                        LocalMediaPlaceholderBox(
-                            engine = engine,
-                            onPickVisual = { visualMediaPicker.launch(arrayOf("image/*", "video/*")) },
-                            onPickAudio = { audioMediaPicker.launch(arrayOf("audio/*")) },
-                            onJumpHome = { activeTab = SynkaTab.HOME }
-                        )
-                    }
-                }
-            }
-
-            if (isAudioLoaded && activeTab != SynkaTab.AUDIO_EQ) {
-                PersistentMiniPlayerBar(
-                    engine = engine,
-                    onTapJumpToEq = { activeTab = SynkaTab.AUDIO_EQ }
-                )
-            }
-
-            PersistentBottomDock(
-                activeTab = activeTab,
-                onSelectTab = { activeTab = it }
-            )
-        }
-
-        // Material3 ModalBottomSheet PresetSheet
-        activePresetSheet?.let { sheetModel ->
-            PresetSheet(
-                engine = engine,
-                activeDomain = sheetModel.domain,
-                selectedDisplayGenre = sheetModel.displayGenre,
-                selectedAudioGenre = sheetModel.audioGenre,
-                onSelectDisplayGenre = { genre ->
-                    applyDisplayGenreFromDeck(genre)
-                    activePresetSheet = sheetModel.copy(
-                        domain = PresetDomain.DISPLAY,
-                        displayGenre = genre,
-                        audioGenre = activeAudioGenre ?: sheetModel.audioGenre
-                    )
-                },
-                onSelectAudioGenre = { genre ->
-                    applyAudioGenreFromDeck(genre)
-                    activePresetSheet = sheetModel.copy(
-                        domain = PresetDomain.AUDIO,
-                        audioGenre = genre,
-                        displayGenre = activeDisplayGenre ?: sheetModel.displayGenre
-                    )
-                },
-                onSwitchDomain = { newDomain ->
-                    activePresetSheet = sheetModel.copy(domain = newDomain)
-                },
-                onApplyPreset = { preset ->
-                    engine.applyPreset(preset)
-                    if (preset.id != SynkaBuiltInPresets.KORA.id) {
-                        preset.displayGenre?.let { activeDisplayGenre = it }
-                        preset.audioGenre?.let { activeAudioGenre = it }
-                    }
-                    val genreKey = if (sheetModel.domain == PresetDomain.AUDIO) {
-                        "${PresetDomain.AUDIO.name}:${sheetModel.audioGenre.name}"
-                    } else {
-                        "${PresetDomain.DISPLAY.name}:${sheetModel.displayGenre.name}"
-                    }
-                    lastUsedPresetByGenre[genreKey] = preset.id
-                },
-                onOpenStudio = { preset, targetDomain ->
-                    engine.applyPreset(preset)
-                    if (preset.id != SynkaBuiltInPresets.KORA.id) {
-                        preset.displayGenre?.let { activeDisplayGenre = it }
-                        preset.audioGenre?.let { activeAudioGenre = it }
-                    }
-                    activePresetSheet = null
-                    activeTab = if (targetDomain == PresetDomain.AUDIO) {
-                        SynkaTab.AUDIO_EQ
-                    } else {
-                        SynkaTab.DISPLAY_EQ
-                    }
-                },
-                onEditVisualMedia = {
-                    visualMediaPicker.launch(arrayOf("image/*", "video/*"))
-                },
-                onEditAudioMedia = {
-                    audioMediaPicker.launch(arrayOf("audio/*"))
-                },
-                onDismiss = {
-                    activePresetSheet = null
-                }
-            )
-        }
-
-        if (isDiscoverOpen) {
-            DiscoverPlaceholderOverlay(
-                onDismiss = { isDiscoverOpen = false }
-            )
-        }
-
-        if (isDrawerOpen) {
-            StudioDrawerOverlay(
+    ModalNavigationDrawer(
+        drawerState = drawerState,
+        gesturesEnabled = activeTab == SynkaTab.HOME || drawerState.isOpen,
+        drawerContent = {
+            SettingsDrawerSheet(
                 engine = engine,
                 onResetKora = {
                     engine.resetToKora()
                     activeDisplayGenre = null
                     activeAudioGenre = null
-                    isDrawerOpen = false
+                    scope.launch { drawerState.close() }
                 },
-                onClose = { isDrawerOpen = false }
+                onPresetImported = { imported ->
+                    syncGenreHighlightsForPreset(imported)
+                },
+                onCloseDrawer = {
+                    scope.launch { drawerState.close() }
+                }
             )
+        }
+    ) {
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(colors.background)
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .then(backdropBlurModifier)
+                    .statusBarsPadding()
+            ) {
+                Box(
+                    modifier = Modifier
+                        .weight(1f)
+                        .fillMaxWidth()
+                ) {
+                    when (activeTab) {
+                        SynkaTab.HOME -> {
+                            HomeScreen(
+                                engine = engine,
+                                activeDisplayGenre = activeDisplayGenre,
+                                activeAudioGenre = activeAudioGenre,
+                                isPreviewActive = !isPresetSheetShowingVisual,
+                                onOpenDrawer = {
+                                    scope.launch { drawerState.open() }
+                                },
+                                onPickVisualMedia = {
+                                    visualMediaPicker.launch(arrayOf("image/*", "video/*"))
+                                },
+                                onPickAudioMedia = {
+                                    audioMediaPicker.launch(arrayOf("audio/*"))
+                                },
+                                onDisplayGenreTap = { genre -> applyDisplayGenreFromDeck(genre) },
+                                onAudioGenreTap = { genre -> applyAudioGenreFromDeck(genre) },
+                                onOpenPresetSheet = { domain, genreName ->
+                                    val resolvedDisplay = if (domain == PresetDomain.DISPLAY) {
+                                        DisplayGenre.entries.firstOrNull { it.name == genreName }
+                                            ?: activeDisplayGenre
+                                            ?: DisplayGenre.CINEMA_GRADE
+                                    } else {
+                                        activeDisplayGenre ?: DisplayGenre.CINEMA_GRADE
+                                    }
+                                    val resolvedAudio = if (domain == PresetDomain.AUDIO) {
+                                        AudioGenre.entries.firstOrNull { it.name == genreName }
+                                            ?: activeAudioGenre
+                                            ?: AudioGenre.BASS
+                                    } else {
+                                        activeAudioGenre ?: AudioGenre.BASS
+                                    }
+                                    activePresetSheet = PresetSheetStateModel(
+                                        domain = domain,
+                                        displayGenre = resolvedDisplay,
+                                        audioGenre = resolvedAudio
+                                    )
+                                },
+                                onDiscoverPresetApplied = { preset ->
+                                    syncGenreHighlightsForPreset(preset)
+                                }
+                            )
+                        }
+                        SynkaTab.DISPLAY_EQ -> {
+                            ArkaStudio(
+                                engine = engine,
+                                activeDisplayGenre = activeDisplayGenre,
+                                isPreviewActive = !isPresetSheetShowingVisual,
+                                onEditVisualMedia = {
+                                    visualMediaPicker.launch(arrayOf("image/*", "video/*"))
+                                },
+                                onResetToKora = {
+                                    engine.resetToKora()
+                                    activeDisplayGenre = null
+                                    activeAudioGenre = null
+                                },
+                                onPresetSaved = { saved ->
+                                    saved.displayGenre?.let { genre ->
+                                        activeDisplayGenre = genre
+                                        lastUsedPresetByGenre["${PresetDomain.DISPLAY.name}:${genre.name}"] = saved.id
+                                    }
+                                }
+                            )
+                        }
+                        SynkaTab.AUDIO_EQ -> {
+                            SvaraStudio(
+                                engine = engine,
+                                activeAudioGenre = activeAudioGenre,
+                                onEditAudioMedia = {
+                                    audioMediaPicker.launch(arrayOf("audio/*"))
+                                },
+                                onResetAudioToFlat = {
+                                    engine.applyPreset(SynkaBuiltInPresets.AUDIO_STUDIO_FLAT)
+                                    activeAudioGenre = AudioGenre.FLAT
+                                },
+                                onPresetSaved = { saved ->
+                                    saved.audioGenre?.let { genre ->
+                                        activeAudioGenre = genre
+                                        lastUsedPresetByGenre["${PresetDomain.AUDIO.name}:${genre.name}"] = saved.id
+                                    }
+                                }
+                            )
+                        }
+                        SynkaTab.LOCAL_MEDIA -> {
+                            LocalMediaPlaceholderBox(
+                                engine = engine,
+                                onPickVisual = { visualMediaPicker.launch(arrayOf("image/*", "video/*")) },
+                                onPickAudio = { audioMediaPicker.launch(arrayOf("audio/*")) },
+                                onJumpHome = { activeTab = SynkaTab.HOME }
+                            )
+                        }
+                    }
+                }
+
+                if (isAudioLoaded && activeTab != SynkaTab.AUDIO_EQ) {
+                    PersistentMiniPlayerBar(
+                        engine = engine,
+                        onTapJumpToEq = { activeTab = SynkaTab.AUDIO_EQ }
+                    )
+                }
+
+                PersistentBottomDock(
+                    activeTab = activeTab,
+                    onSelectTab = { activeTab = it }
+                )
+            }
+
+            // Material3 ModalBottomSheet PresetSheet
+            activePresetSheet?.let { sheetModel ->
+                PresetSheet(
+                    engine = engine,
+                    activeDomain = sheetModel.domain,
+                    selectedDisplayGenre = sheetModel.displayGenre,
+                    selectedAudioGenre = sheetModel.audioGenre,
+                    onSelectDisplayGenre = { genre ->
+                        applyDisplayGenreFromDeck(genre)
+                        activePresetSheet = sheetModel.copy(
+                            domain = PresetDomain.DISPLAY,
+                            displayGenre = genre,
+                            audioGenre = activeAudioGenre ?: sheetModel.audioGenre
+                        )
+                    },
+                    onSelectAudioGenre = { genre ->
+                        applyAudioGenreFromDeck(genre)
+                        activePresetSheet = sheetModel.copy(
+                            domain = PresetDomain.AUDIO,
+                            audioGenre = genre,
+                            displayGenre = activeDisplayGenre ?: sheetModel.displayGenre
+                        )
+                    },
+                    onSwitchDomain = { newDomain ->
+                        activePresetSheet = sheetModel.copy(domain = newDomain)
+                    },
+                    onApplyPreset = { preset ->
+                        engine.applyPreset(preset)
+                        if (preset.id != SynkaBuiltInPresets.KORA.id) {
+                            preset.displayGenre?.let { activeDisplayGenre = it }
+                            preset.audioGenre?.let { activeAudioGenre = it }
+                        }
+                        val genreKey = if (sheetModel.domain == PresetDomain.AUDIO) {
+                            "${PresetDomain.AUDIO.name}:${sheetModel.audioGenre.name}"
+                        } else {
+                            "${PresetDomain.DISPLAY.name}:${sheetModel.displayGenre.name}"
+                        }
+                        lastUsedPresetByGenre[genreKey] = preset.id
+                    },
+                    onOpenStudio = { preset, targetDomain ->
+                        engine.applyPreset(preset)
+                        if (preset.id != SynkaBuiltInPresets.KORA.id) {
+                            preset.displayGenre?.let { activeDisplayGenre = it }
+                            preset.audioGenre?.let { activeAudioGenre = it }
+                        }
+                        activePresetSheet = null
+                        activeTab = if (targetDomain == PresetDomain.AUDIO) {
+                            SynkaTab.AUDIO_EQ
+                        } else {
+                            SynkaTab.DISPLAY_EQ
+                        }
+                    },
+                    onEditVisualMedia = {
+                        visualMediaPicker.launch(arrayOf("image/*", "video/*"))
+                    },
+                    onEditAudioMedia = {
+                        audioMediaPicker.launch(arrayOf("audio/*"))
+                    },
+                    onDismiss = {
+                        activePresetSheet = null
+                    }
+                )
+            }
         }
     }
 }
@@ -744,7 +777,7 @@ private fun PersistentBottomDock(
 }
 
 // -----------------------------------------------------------------------------
-// Placeholder Boxes for Chunks 12–13
+// Placeholder Box for Chunk 13 (Local Media Library & Per-File Bindings)
 // -----------------------------------------------------------------------------
 
 @Composable
@@ -777,7 +810,7 @@ private fun LocalMediaPlaceholderBox(
                 color = colors.primaryText
             )
             Text(
-                text = "Placeholder for Chunk 12 • Media Library & Per-File Preset Bindings. Use the quick pickers below to test live preview and the persistent Mini-Player now.",
+                text = "Placeholder for Chunk 13 • Media Library & Per-File Preset Bindings. Use the quick pickers below to test live preview and the persistent Mini-Player now.",
                 style = MaterialTheme.typography.bodySmall,
                 color = colors.secondaryText
             )
@@ -838,211 +871,6 @@ private fun LocalMediaPlaceholderBox(
                 }
             }
         }
-    }
-}
-
-@Composable
-private fun DiscoverPlaceholderOverlay(onDismiss: () -> Unit) {
-    val colors = LocalSynkaColors.current
-
-    Box(
-        modifier = Modifier
-            .fillMaxSize()
-            .background(Color.Black.copy(alpha = 0.58f))
-            .clickable(onClick = onDismiss),
-        contentAlignment = Alignment.Center
-    ) {
-        Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 24.dp)
-                .clip(RoundedCornerShape(18.dp))
-                .background(colors.surface)
-                .border(1.dp, colors.hairline, RoundedCornerShape(18.dp))
-                .clickable(enabled = false, onClick = {})
-                .padding(20.dp),
-            verticalArrangement = Arrangement.spacedBy(10.dp)
-        ) {
-            Text(
-                text = "Discover Presets",
-                style = MaterialTheme.typography.headlineSmall,
-                color = colors.primaryText
-            )
-            Text(
-                text = "Search across built-in presets, favorites, and custom studio looks arrives in Chunks 12–13.",
-                style = MaterialTheme.typography.bodySmall,
-                color = colors.secondaryText
-            )
-            Box(
-                modifier = Modifier
-                    .align(Alignment.End)
-                    .clip(RoundedCornerShape(50))
-                    .background(colors.activeAccent)
-                    .clickable(onClick = onDismiss)
-                    .padding(horizontal = 16.dp, vertical = 8.dp)
-            ) {
-                Text(
-                    text = "Close",
-                    style = MaterialTheme.typography.labelMedium,
-                    fontWeight = FontWeight.Bold,
-                    color = SynkaPalette.ObsidianCharcoal
-                )
-            }
-        }
-    }
-}
-
-@Composable
-private fun StudioDrawerOverlay(
-    engine: SynkaEngine,
-    onResetKora: () -> Unit,
-    onClose: () -> Unit
-) {
-    val colors = LocalSynkaColors.current
-
-    Box(
-        modifier = Modifier
-            .fillMaxSize()
-            .background(Color.Black.copy(alpha = 0.58f))
-            .clickable(onClick = onClose),
-        contentAlignment = Alignment.CenterEnd
-    ) {
-        Column(
-            modifier = Modifier
-                .fillMaxHeight()
-                .width(280.dp)
-                .background(colors.surface)
-                .border(1.dp, colors.hairline)
-                .clickable(enabled = false, onClick = {})
-                .systemBarsPadding()
-                .padding(18.dp),
-            verticalArrangement = Arrangement.spacedBy(14.dp)
-        ) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Text(
-                    text = "Synka Studio",
-                    style = MaterialTheme.typography.headlineSmall,
-                    color = colors.primaryText
-                )
-                Text(
-                    text = "CLOSE",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = colors.secondaryText,
-                    modifier = Modifier.clickable(onClick = onClose)
-                )
-            }
-
-            HorizontalDivider(thickness = 1.dp, color = colors.hairline)
-
-            Text(
-                text = "APPEARANCE",
-                style = MaterialTheme.typography.labelSmall,
-                color = colors.secondaryText
-            )
-
-            val isArtisan = engine.themeMode == SynkaThemeMode.ARTISAN_EDITION
-            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                DrawerModeOption(
-                    title = "Studio Reference",
-                    subtitle = "Neutral steel accents, zero watermarks",
-                    selected = !isArtisan,
-                    onClick = { engine.setThemeMode(SynkaThemeMode.STUDIO_REFERENCE) }
-                )
-                DrawerModeOption(
-                    title = "Artisan Edition",
-                    subtitle = "Kansa Bronze + 5% Yantra banner linework",
-                    selected = isArtisan,
-                    onClick = { engine.setThemeMode(SynkaThemeMode.ARTISAN_EDITION) }
-                )
-            }
-
-            HorizontalDivider(thickness = 1.dp, color = colors.hairline)
-
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clip(RoundedCornerShape(12.dp))
-                    .background(colors.elevatedSurface)
-                    .border(1.dp, colors.hairline, RoundedCornerShape(12.dp))
-                    .clickable(onClick = onResetKora)
-                    .padding(horizontal = 14.dp, vertical = 11.dp)
-            ) {
-                Text(
-                    text = "Reset All to Kora (Neutral)",
-                    style = MaterialTheme.typography.bodySmall,
-                    fontWeight = FontWeight.Medium,
-                    color = colors.primaryText
-                )
-            }
-
-            Spacer(modifier = Modifier.weight(1f))
-
-            Text(
-                text = "v1 Sandbox • API ${Build.VERSION.SDK_INT} (${Build.MODEL})",
-                style = MaterialTheme.typography.labelSmall,
-                color = colors.secondaryText
-            )
-
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clip(RoundedCornerShape(10.dp))
-                    .background(SynkaPalette.SindoorCrimson.copy(alpha = 0.16f))
-                    .border(1.dp, SynkaPalette.SindoorCrimson.copy(alpha = 0.5f), RoundedCornerShape(10.dp))
-                    .clickable {
-                        throw RuntimeException("Synka Test Gate 11: Simulated uncaught exception")
-                    }
-                    .padding(horizontal = 12.dp, vertical = 9.dp),
-                contentAlignment = Alignment.Center
-            ) {
-                Text(
-                    text = "Test Crash Catcher",
-                    style = MaterialTheme.typography.labelSmall,
-                    fontWeight = FontWeight.SemiBold,
-                    color = SynkaPalette.SindoorCrimson
-                )
-            }
-        }
-    }
-}
-
-@Composable
-private fun DrawerModeOption(
-    title: String,
-    subtitle: String,
-    selected: Boolean,
-    onClick: () -> Unit
-) {
-    val colors = LocalSynkaColors.current
-    Column(
-        modifier = Modifier
-            .fillMaxWidth()
-            .clip(RoundedCornerShape(12.dp))
-            .background(if (selected) colors.elevatedSurface else colors.background)
-            .border(
-                width = if (selected) 1.4.dp else 1.dp,
-                color = if (selected) colors.activeAccent else colors.hairline,
-                shape = RoundedCornerShape(12.dp)
-            )
-            .clickable(onClick = onClick)
-            .padding(12.dp),
-        verticalArrangement = Arrangement.spacedBy(2.dp)
-    ) {
-        Text(
-            text = title,
-            style = MaterialTheme.typography.bodySmall,
-            fontWeight = FontWeight.SemiBold,
-            color = if (selected) colors.activeAccentStrong else colors.primaryText
-        )
-        Text(
-            text = subtitle,
-            style = MaterialTheme.typography.labelSmall,
-            color = colors.secondaryText
-        )
     }
 }
 
