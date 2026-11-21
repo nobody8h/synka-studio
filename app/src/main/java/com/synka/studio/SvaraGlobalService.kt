@@ -10,6 +10,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.content.pm.ServiceInfo
+import android.graphics.drawable.Icon
 import android.media.AudioAttributes
 import android.media.AudioManager
 import android.media.AudioPlaybackConfiguration
@@ -27,7 +28,6 @@ import kotlin.math.abs
 import kotlin.math.cos
 import kotlin.math.hypot
 import kotlin.math.log10
-import kotlin.math.min
 import kotlin.math.pow
 import kotlin.math.sin
 import kotlin.math.sqrt
@@ -44,7 +44,6 @@ class SvaraGlobalService : Service() {
         private const val KEY_SVARA_JSON = "sys_svara_json"
         private const val KEY_MASTER = "sys_master_enabled"
 
-        // 16 fixed ascending bands — safely below Android 15/16's 32-band hardware ceiling
         private val BAND_CUTOFFS_HZ = floatArrayOf(
             40f, 62f, 95f, 140f,
             210f, 320f, 480f, 720f,
@@ -135,9 +134,8 @@ class SvaraGlobalService : Service() {
             val action = intent?.action ?: return
             val sessionId = intent.getIntExtra(AudioEffect.EXTRA_AUDIO_SESSION, 0)
             val pkg = intent.getStringExtra(AudioEffect.EXTRA_PACKAGE_NAME).orEmpty()
-            if (sessionId <= 0 |
-
-| pkg == packageName) return
+            if (sessionId <= 0) return
+            if (pkg == packageName) return
 
             when (action) {
                 AudioEffect.ACTION_OPEN_AUDIO_EFFECT_CONTROL_SESSION -> {
@@ -227,14 +225,14 @@ class SvaraGlobalService : Service() {
     private fun createDpConfig(): DynamicsProcessing.Config {
         return DynamicsProcessing.Config.Builder(
             DynamicsProcessing.VARIANT_FAVOR_FREQUENCY_RESOLUTION,
-            2,      // stereo channels
-            true,   // preEqInUse
+            2,
+            true,
             BAND_CUTOFFS_HZ.size,
-            false,  // mbcInUse
+            false,
             0,
-            false,  // postEqInUse
+            false,
             0,
-            true    // limiterInUse
+            true
         )
             .setPreferredFrameDuration(10f)
             .build()
@@ -242,9 +240,8 @@ class SvaraGlobalService : Service() {
 
     @RequiresApi(Build.VERSION_CODES.P)
     private fun ensureSession0Attached() {
-        if (session0Dp != null |
-
-| session0Failed) return
+        if (session0Dp != null) return
+        if (session0Failed) return
         val attempt = runCatching {
             val cfg = createDpConfig()
             DynamicsProcessing(0, 0, cfg)
@@ -383,7 +380,7 @@ class SvaraGlobalService : Service() {
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val cb = object : AudioManager.AudioPlaybackCallback() {
-                override fun onPlaybackConfigChanged(configs: MutableList<AudioPlaybackConfiguration>?) {
+                override fun onPlaybackConfigChanged(configs: List<AudioPlaybackConfiguration>) {
                     refreshCallState(configs)
                     applyCurrentSettings()
                 }
@@ -410,26 +407,30 @@ class SvaraGlobalService : Service() {
     private fun refreshCallState(configs: List<AudioPlaybackConfiguration>? = null) {
         val am = audioManager
         val mode = am?.mode ?: AudioManager.MODE_NORMAL
-        val modeBusy = mode == AudioManager.MODE_IN_CALL ||
-            mode == AudioManager.MODE_IN_COMMUNICATION ||
-            mode == AudioManager.MODE_RINGTONE ||
-            (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU && mode == AudioManager.MODE_CALL_SCREENING)
+        val modeBusy = when {
+            mode == AudioManager.MODE_IN_CALL -> true
+            mode == AudioManager.MODE_IN_COMMUNICATION -> true
+            mode == AudioManager.MODE_RINGTONE -> true
+            Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+                mode == AudioManager.MODE_CALL_SCREENING -> true
+            else -> false
+        }
 
         val playbackBusy = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val activeConfigs = configs ?: runCatching { am?.activePlaybackConfigurations }.getOrNull().orEmpty()
             activeConfigs.any { cfg ->
-                val usage = cfg.audioAttributes.usage
-                usage == AudioAttributes.USAGE_VOICE_COMMUNICATION ||
-                    usage == AudioAttributes.USAGE_VOICE_COMMUNICATION_SIGNALLING ||
-                    usage == AudioAttributes.USAGE_NOTIFICATION_RINGTONE
+                when (cfg.audioAttributes.usage) {
+                    AudioAttributes.USAGE_VOICE_COMMUNICATION -> true
+                    AudioAttributes.USAGE_VOICE_COMMUNICATION_SIGNALLING -> true
+                    AudioAttributes.USAGE_NOTIFICATION_RINGTONE -> true
+                    else -> false
+                }
             }
         } else {
             false
         }
 
-        isCallOrRingtoneActive = modeBusy |
-
-| playbackBusy
+        isCallOrRingtoneActive = if (modeBusy) true else playbackBusy
     }
 
     private fun createNotificationChannelIfNeeded() {
@@ -468,25 +469,21 @@ class SvaraGlobalService : Service() {
             Notification.Builder(this)
         }
 
+        val stopAction = Notification.Action.Builder(
+            Icon.createWithResource(this, android.R.drawable.ic_menu_close_clear_cancel),
+            "Turn Off",
+            stopIntent
+        ).build()
+
         return builder
             .setContentTitle("Synka System Audio EQ")
             .setContentText("Active across device media (calls excluded)")
             .setSmallIcon(android.R.drawable.ic_media_play)
             .setContentIntent(launchIntent)
-            .addAction(
-                Notification.Action.Builder(
-                    null,
-                    "Turn Off",
-                    stopIntent
-                ).build()
-            )
+            .addAction(stopAction)
             .setOngoing(true)
             .build()
     }
-
-    // -------------------------------------------------------------------------
-    // Exact 12-stage SvaraParams -> 16-band DynamicsProcessing Response Sampler
-    // -------------------------------------------------------------------------
 
     private data class Coeffs(
         val b0: Double = 1.0,
@@ -600,9 +597,8 @@ class SvaraGlobalService : Service() {
     }
 
     private fun normalize(b0: Double, b1: Double, b2: Double, a0: Double, a1: Double, a2: Double): Coeffs {
-        if (abs(a0) < 1e-12 |
-
-| !a0.isFinite()) return Coeffs()
+        if (abs(a0) < 1e-12) return Coeffs()
+        if (!a0.isFinite()) return Coeffs()
         val inv = 1.0 / a0
         return Coeffs(b0 * inv, b1 * inv, b2 * inv, a1 * inv, a2 * inv)
     }
