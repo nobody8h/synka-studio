@@ -1,820 +1,1203 @@
 package com.synka.studio
 
-import androidx.annotation.OptIn
-import androidx.media3.common.C
-import androidx.media3.common.audio.AudioProcessor
-import androidx.media3.common.audio.BaseAudioProcessor
-import androidx.media3.common.util.UnstableApi
-import java.nio.ByteBuffer
-import java.nio.ByteOrder
-import java.util.concurrent.atomic.AtomicInteger
-import kotlin.math.PI
+import android.os.SystemClock
+import android.widget.Toast
+import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Text
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.CornerRadius
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.StrokeJoin
+import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalHapticFeedback
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import java.util.Locale
 import kotlin.math.abs
-import kotlin.math.cos
-import kotlin.math.exp
-import kotlin.math.max
-import kotlin.math.min
-import kotlin.math.pow
-import kotlin.math.sin
-import kotlin.math.sqrt
-import kotlin.math.tanh
+import kotlin.math.roundToInt
 
-@OptIn(UnstableApi::class)
-class SvaraAudio : BaseAudioProcessor() {
+private val SvaraTabTitles = listOf("10-Band", "Contour", "Globes", "Safety")
 
-    companion object {
-        const val STAGE_COUNT = 12
-        const val WAVEFORM_BARS = 48
+@Composable
+fun SvaraStudio(
+    engine: SynkaEngine,
+    activeAudioGenre: AudioGenre?,
+    onEditAudioMedia: () -> Unit,
+    onResetAudioToFlat: () -> Unit,
+    onPresetSaved: (SynkaPreset) -> Unit = {},
+    modifier: Modifier = Modifier
+) {
+    val context = LocalContext.current
+    val colors = LocalSynkaColors.current
+    val svara = engine.activeSvara
 
-        private const val MIN_FREQ_HZ = 20.0
-        private const val NYQUIST_SAFETY_RATIO = 0.45
-        private const val MIN_Q = 0.3
-        private const val MAX_Q = 12.0
-        private const val DENORMAL_EPS = 1e-25
-        private const val PCM16_INV_SCALE = 1.0 / 32768.0
-        private const val PCM16_OUT_SCALE = 32767.0
-        private const val CONTOUR_WEIGHT = 0.55
-    }
+    var selectedTab by remember { mutableIntStateOf(0) }
+    var selectedBandIndex by remember { mutableIntStateOf(0) }
 
-    // Read-only telemetry for UI verification strip
-    @Volatile
-    var activeSampleRate: Int = 48000
-        private set
-
-    @Volatile
-    var activeChannelCount: Int = 2
-        private set
-
-    @Volatile
-    var activeEncoding: Int = C.ENCODING_PCM_16BIT
-        private set
-
-    // UI-side serialization lock (NEVER acquired on audio thread)
-    private val paramLock = Any()
-    private var lastParams: SvaraParams = SvaraParams()
-    private var lastBypassed: Boolean = false
-
-    // Lock-free seqlock + dirty flag for tear-free double-buffering
-    private val stagingVersion = AtomicInteger(0)
-
-    @Volatile
-    private var dirty: Boolean = false
-
-    // Staging coefficient banks (written on UI/config thread)
-    private val stagingB0 = DoubleArray(STAGE_COUNT) { 1.0 }
-    private val stagingB1 = DoubleArray(STAGE_COUNT)
-    private val stagingB2 = DoubleArray(STAGE_COUNT)
-    private val stagingA1 = DoubleArray(STAGE_COUNT)
-    private val stagingA2 = DoubleArray(STAGE_COUNT)
-
-    private var stagingPreAmpGain: Double = 1.0
-    private var stagingStereoWidth: Double = 1.0
-    private var stagingNightDialogue: Double = 0.0
-    private var stagingAntiCrackle: Double = 0.75
-    private var stagingBalanceL: Double = 1.0
-    private var stagingBalanceR: Double = 1.0
-    private var stagingBypassed: Boolean = false
-
-    // Audio-thread scratch bank to guarantee zero torn reads before commit
-    private val scratchB0 = DoubleArray(STAGE_COUNT) { 1.0 }
-    private val scratchB1 = DoubleArray(STAGE_COUNT)
-    private val scratchB2 = DoubleArray(STAGE_COUNT)
-    private val scratchA1 = DoubleArray(STAGE_COUNT)
-    private val scratchA2 = DoubleArray(STAGE_COUNT)
-
-    // Active coefficient banks (read exclusively on audio thread)
-    private val b0 = DoubleArray(STAGE_COUNT) { 1.0 }
-    private val b1 = DoubleArray(STAGE_COUNT)
-    private val b2 = DoubleArray(STAGE_COUNT)
-    private val a1 = DoubleArray(STAGE_COUNT)
-    private val a2 = DoubleArray(STAGE_COUNT)
-
-    // Pre-allocated TDF-II delay states for all 12 stages (Left & Right)
-    private val s1L = DoubleArray(STAGE_COUNT)
-    private val s2L = DoubleArray(STAGE_COUNT)
-    private val s1R = DoubleArray(STAGE_COUNT)
-    private val s2R = DoubleArray(STAGE_COUNT)
-
-    // Active smoothed audio-thread scalars
-    private var targetPreAmpGain: Double = 1.0
-    private var currentPreAmpGain: Double = 1.0
-    private var targetStereoWidth: Double = 1.0
-    private var currentStereoWidth: Double = 1.0
-    private var targetBalanceL: Double = 1.0
-    private var currentBalanceL: Double = 1.0
-    private var targetBalanceR: Double = 1.0
-    private var currentBalanceR: Double = 1.0
-    private var targetWetMix: Double = 1.0
-    private var currentWetMix: Double = 1.0
-    private var activeNightDialogue: Double = 0.0
-    private var activeAntiCrackle: Double = 0.75
-
-    // Envelope follower states (Night Dialogue + Anti-Crackle peak guard)
-    private var smoothCoeff: Double = 0.005
-    private var niAttackCoeff: Double = 0.997
-    private var niReleaseCoeff: Double = 0.9998
-    private var peakAttackCoeff: Double = 0.95
-    private var peakReleaseCoeff: Double = 0.9994
-    private var niEnvelope: Double = 0.0
-    private var niGainSmooth: Double = 1.0
-    private var peakEnvelope: Double = 0.0
-
-    // Lock-free pre-allocated 48-bar waveform snapshot
-    private val waveformWork = FloatArray(WAVEFORM_BARS)
-    private val waveformSnapshot = FloatArray(WAVEFORM_BARS)
-
-    init {
-        updateParams(SvaraParams(), bypassed = false)
-    }
-
-    fun activeEncodingLabel(): String = when (activeEncoding) {
-        C.ENCODING_PCM_FLOAT -> "PCM_FLOAT"
-        C.ENCODING_PCM_16BIT -> "PCM_16BIT"
-        else -> "ENC_$activeEncoding"
-    }
-
-    /**
-     * Thread-safe parameter update from UI/background threads.
-     * Computes all 12 biquad stages into staging arrays under a seqlock so
-     * the real-time audio thread never blocks and never reads torn coefficients.
-     */
-    fun updateParams(params: SvaraParams, bypassed: Boolean) {
-        synchronized(paramLock) {
-            val normalized = params.normalized()
-            lastParams = normalized
-            lastBypassed = bypassed
-            stageCoefficientsLocked(normalized, bypassed, activeSampleRate)
-        }
-    }
-
-    /**
-     * Lock-free copy of the latest normalized 48-bar waveform peaks (0f..1f).
-     */
-    fun readWaveform(dest: FloatArray) {
-        val count = min(dest.size, WAVEFORM_BARS)
-        var i = 0
-        while (i < count) {
-            dest[i] = waveformSnapshot[i]
-            i++
-        }
-    }
-
-    fun clearWaveform() {
-        var i = 0
-        while (i < WAVEFORM_BARS) {
-            waveformWork[i] = 0f
-            waveformSnapshot[i] = 0f
-            i++
-        }
-    }
-
-    @Throws(AudioProcessor.UnhandledAudioFormatException::class)
-    override fun onConfigure(
-        inputAudioFormat: AudioProcessor.AudioFormat
-    ): AudioProcessor.AudioFormat {
-        val enc = inputAudioFormat.encoding
-        if (
-            (enc != C.ENCODING_PCM_16BIT && enc != C.ENCODING_PCM_FLOAT) ||
-            inputAudioFormat.sampleRate <= 0 ||
-            inputAudioFormat.channelCount <= 0
-        ) {
-            throw AudioProcessor.UnhandledAudioFormatException(inputAudioFormat)
-        }
-
-        val sr = inputAudioFormat.sampleRate.coerceAtLeast(8000)
-        activeSampleRate = sr
-        activeChannelCount = inputAudioFormat.channelCount
-        activeEncoding = enc
-
-        // Pre-compute time-constant coefficients for current sample rate
-        smoothCoeff = 1.0 - exp(-1.0 / (0.004 * sr))          // ~4 ms anti-zipper ramp
-        niAttackCoeff = exp(-1.0 / (0.010 * sr))              // 10 ms attack
-        niReleaseCoeff = exp(-1.0 / (0.180 * sr))             // 180 ms release
-        peakAttackCoeff = exp(-1.0 / (0.0005 * sr))           // 0.5 ms fast limiter attack
-        peakReleaseCoeff = exp(-1.0 / (0.055 * sr))           // 55 ms limiter release
-
-        clearFilterStates()
-        clearWaveform()
-
-        synchronized(paramLock) {
-            stageCoefficientsLocked(lastParams, lastBypassed, sr)
-        }
-        syncStagedToActiveIfReady()
-
-        return inputAudioFormat
-    }
-
-    override fun queueInput(inputBuffer: ByteBuffer) {
-        val remaining = inputBuffer.remaining()
-        if (remaining <= 0) {
-            return
-        }
-
-        if (dirty) {
-            syncStagedToActiveIfReady()
-        }
-
-        val enc = activeEncoding
-        val channels = activeChannelCount
-        val bytesPerSample = if (enc == C.ENCODING_PCM_FLOAT) 4 else 2
-        val bytesPerFrame = bytesPerSample * channels
-        val frameCount = remaining / bytesPerFrame
-        if (frameCount <= 0) {
-            inputBuffer.position(inputBuffer.limit())
-            return
-        }
-
-        val src = inputBuffer.order(ByteOrder.nativeOrder())
-        val dst = replaceOutputBuffer(frameCount * bytesPerFrame).order(ByteOrder.nativeOrder())
-
-        var barIdx = 0
-        while (barIdx < WAVEFORM_BARS) {
-            waveformWork[barIdx] = 0f
-            barIdx++
-        }
-
-        val isFloat = (enc == C.ENCODING_PCM_FLOAT)
-
-        if (channels == 2) {
-            processStereoBuffer(src, dst, frameCount, isFloat)
-        } else if (channels == 1) {
-            processMonoBuffer(src, dst, frameCount, isFloat)
-        } else {
-            processMultiChannelSafe(src, dst, frameCount, channels, isFloat)
-        }
-
-        // Publish smoothed peak snapshot lock-free once per buffer
-        var w = 0
-        while (w < WAVEFORM_BARS) {
-            val peak = waveformWork[w]
-            val prev = waveformSnapshot[w]
-            val smoothed = if (peak >= prev) {
-                prev + (peak - prev) * 0.72f
-            } else {
-                prev * 0.78f + peak * 0.22f
-            }
-            waveformSnapshot[w] = smoothed.coerceIn(0f, 1f)
-            w++
-        }
-
-        inputBuffer.position(inputBuffer.limit())
-        dst.flip()
-    }
-
-    override fun onFlush() {
-        clearFilterStates()
-        clearWaveform()
-    }
-
-    override fun onReset() {
-        clearFilterStates()
-        clearWaveform()
-        activeEncoding = C.ENCODING_PCM_16BIT
-        activeSampleRate = 48000
-        activeChannelCount = 2
-    }
-
-    private fun processStereoBuffer(
-        src: ByteBuffer,
-        dst: ByteBuffer,
-        frameCount: Int,
-        isFloat: Boolean
+    Column(
+        modifier = modifier
+            .fillMaxSize()
+            .background(colors.background)
+            .padding(horizontal = 10.dp, vertical = 8.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp)
     ) {
-        val sm = smoothCoeff
-        val niLevel = activeNightDialogue
-        val arLevel = activeAntiCrackle
-        val kneeThreshold = 0.96 - 0.28 * arLevel
-        val kneeHeadroom = 1.0 - kneeThreshold
-        val invKneeHeadroom = 1.0 / kneeHeadroom
-
-        var frame = 0
-        while (frame < frameCount) {
-            val dryL: Double
-            val dryR: Double
-            if (isFloat) {
-                dryL = src.float.toDouble()
-                dryR = src.float.toDouble()
-            } else {
-                dryL = src.short.toDouble() * PCM16_INV_SCALE
-                dryR = src.short.toDouble() * PCM16_INV_SCALE
-            }
-
-            // Smooth scalar parameters per sample to eliminate zipper noise
-            currentPreAmpGain += (targetPreAmpGain - currentPreAmpGain) * sm
-            currentStereoWidth += (targetStereoWidth - currentStereoWidth) * sm
-            currentBalanceL += (targetBalanceL - currentBalanceL) * sm
-            currentBalanceR += (targetBalanceR - currentBalanceR) * sm
-            currentWetMix += (targetWetMix - currentWetMix) * sm
-
-            var l = dryL * currentPreAmpGain
-            var r = dryR * currentPreAmpGain
-
-            // 12-stage TDF-II biquad cascade (Stages 0..9 peaking, 10 low-shelf, 11 high-shelf)
-            var stage = 0
-            while (stage < STAGE_COUNT) {
-                val cb0 = b0[stage]
-                val cb1 = b1[stage]
-                val cb2 = b2[stage]
-                val ca1 = a1[stage]
-                val ca2 = a2[stage]
-
-                val yl = cb0 * l + s1L[stage]
-                var ns1L = cb1 * l - ca1 * yl + s2L[stage]
-                var ns2L = cb2 * l - ca2 * yl
-                if (!ns1L.isFinite() || abs(ns1L) < DENORMAL_EPS) ns1L = 0.0
-                if (!ns2L.isFinite() || abs(ns2L) < DENORMAL_EPS) ns2L = 0.0
-                s1L[stage] = ns1L
-                s2L[stage] = ns2L
-                l = if (yl.isFinite()) yl else 0.0
-
-                val yr = cb0 * r + s1R[stage]
-                var ns1R = cb1 * r - ca1 * yr + s2R[stage]
-                var ns2R = cb2 * r - ca2 * yr
-                if (!ns1R.isFinite() || abs(ns1R) < DENORMAL_EPS) ns1R = 0.0
-                if (!ns2R.isFinite() || abs(ns2R) < DENORMAL_EPS) ns2R = 0.0
-                s1R[stage] = ns1R
-                s2R[stage] = ns2R
-                r = if (yr.isFinite()) yr else 0.0
-
-                stage++
-            }
-
-            // Mid-Side stereo width scaling (safe zero-alloc, unity when width == 1.0)
-            if (abs(currentStereoWidth - 1.0) > 1e-5) {
-                val mid = 0.5 * (l + r)
-                val side = 0.5 * (l - r) * currentStereoWidth
-                l = mid + side
-                r = mid - side
-            }
-
-            // Night Dialogue (Ni): gentle upward boost for quiet dialogue + downward peak leveling
-            if (niLevel > 1e-4) {
-                val niGain = updateNightDialogueGain(max(abs(l), abs(r)), niLevel)
-                l *= niGain
-                r *= niGain
-            } else {
-                niEnvelope *= niReleaseCoeff
-                niGainSmooth += (1.0 - niGainSmooth) * sm
-            }
-
-            // Smooth L/R stereo balance attenuation (Li)
-            l *= currentBalanceL
-            r *= currentBalanceR
-
-            // Anti-Crackle (Ar): fast peak guard + C1-continuous knee tanh soft-clipper
-            val peakIn = max(abs(l), abs(r))
-            val limiterGain = updatePeakGuardGain(peakIn, arLevel)
-            l = applyKneeTanh(l * limiterGain, kneeThreshold, kneeHeadroom, invKneeHeadroom)
-            r = applyKneeTanh(r * limiterGain, kneeThreshold, kneeHeadroom, invKneeHeadroom)
-
-            // Smooth wet/dry bypass crossfade
-            val wet = currentWetMix
-            val dry = 1.0 - wet
-            var outL = dryL * dry + l * wet
-            var outR = dryR * dry + r * wet
-
-            // Absolute ceiling guard so output can never wrap PCM-16
-            outL = outL.coerceIn(-0.999969, 0.999969)
-            outR = outR.coerceIn(-0.999969, 0.999969)
-
-            // Accumulate lock-free 48-bar peak magnitude for this buffer
-            val bucket = ((frame * WAVEFORM_BARS) / frameCount).coerceIn(0, WAVEFORM_BARS - 1)
-            val framePeak = max(abs(outL), abs(outR)).toFloat()
-            if (framePeak > waveformWork[bucket]) {
-                waveformWork[bucket] = framePeak
-            }
-
-            if (isFloat) {
-                dst.putFloat(outL.toFloat())
-                dst.putFloat(outR.toFloat())
-            } else {
-                val sL = (outL * PCM16_OUT_SCALE).toInt().coerceIn(-32768, 32767).toShort()
-                val sR = (outR * PCM16_OUT_SCALE).toInt().coerceIn(-32768, 32767).toShort()
-                dst.putShort(sL)
-                dst.putShort(sR)
-            }
-
-            frame++
-        }
-    }
-
-    private fun processMonoBuffer(
-        src: ByteBuffer,
-        dst: ByteBuffer,
-        frameCount: Int,
-        isFloat: Boolean
-    ) {
-        val sm = smoothCoeff
-        val niLevel = activeNightDialogue
-        val arLevel = activeAntiCrackle
-        val kneeThreshold = 0.96 - 0.28 * arLevel
-        val kneeHeadroom = 1.0 - kneeThreshold
-        val invKneeHeadroom = 1.0 / kneeHeadroom
-
-        var frame = 0
-        while (frame < frameCount) {
-            val drySample = if (isFloat) {
-                src.float.toDouble()
-            } else {
-                src.short.toDouble() * PCM16_INV_SCALE
-            }
-
-            currentPreAmpGain += (targetPreAmpGain - currentPreAmpGain) * sm
-            currentWetMix += (targetWetMix - currentWetMix) * sm
-
-            var x = drySample * currentPreAmpGain
-
-            var stage = 0
-            while (stage < STAGE_COUNT) {
-                val y = b0[stage] * x + s1L[stage]
-                var ns1 = b1[stage] * x - a1[stage] * y + s2L[stage]
-                var ns2 = b2[stage] * x - a2[stage] * y
-                if (!ns1.isFinite() || abs(ns1) < DENORMAL_EPS) ns1 = 0.0
-                if (!ns2.isFinite() || abs(ns2) < DENORMAL_EPS) ns2 = 0.0
-                s1L[stage] = ns1
-                s2L[stage] = ns2
-                x = if (y.isFinite()) y else 0.0
-                stage++
-            }
-
-            if (niLevel > 1e-4) {
-                x *= updateNightDialogueGain(abs(x), niLevel)
-            } else {
-                niEnvelope *= niReleaseCoeff
-                niGainSmooth += (1.0 - niGainSmooth) * sm
-            }
-
-            val limiterGain = updatePeakGuardGain(abs(x), arLevel)
-            x = applyKneeTanh(x * limiterGain, kneeThreshold, kneeHeadroom, invKneeHeadroom)
-
-            val wet = currentWetMix
-            val out = (drySample * (1.0 - wet) + x * wet).coerceIn(-0.999969, 0.999969)
-
-            val bucket = ((frame * WAVEFORM_BARS) / frameCount).coerceIn(0, WAVEFORM_BARS - 1)
-            val mag = abs(out).toFloat()
-            if (mag > waveformWork[bucket]) {
-                waveformWork[bucket] = mag
-            }
-
-            if (isFloat) {
-                dst.putFloat(out.toFloat())
-            } else {
-                dst.putShort((out * PCM16_OUT_SCALE).toInt().coerceIn(-32768, 32767).toShort())
-            }
-
-            frame++
-        }
-    }
-
-    private fun processMultiChannelSafe(
-        src: ByteBuffer,
-        dst: ByteBuffer,
-        frameCount: Int,
-        channels: Int,
-        isFloat: Boolean
-    ) {
-        val sm = smoothCoeff
-        val arLevel = activeAntiCrackle
-        val kneeThreshold = 0.96 - 0.28 * arLevel
-        val kneeHeadroom = 1.0 - kneeThreshold
-        val invKneeHeadroom = 1.0 / kneeHeadroom
-
-        var frame = 0
-        while (frame < frameCount) {
-            currentPreAmpGain += (targetPreAmpGain - currentPreAmpGain) * sm
-            currentWetMix += (targetWetMix - currentWetMix) * sm
-
-            var framePeak = 0f
-            var ch = 0
-            while (ch < channels) {
-                val drySample = if (isFloat) {
-                    src.float.toDouble()
-                } else {
-                    src.short.toDouble() * PCM16_INV_SCALE
-                }
-                val wetSample = applyKneeTanh(
-                    drySample * currentPreAmpGain,
-                    kneeThreshold,
-                    kneeHeadroom,
-                    invKneeHeadroom
+        // Top ~35%: Shared Live Audio Waveform & Transport Header
+        AudioStudioHeader(
+            engine = engine,
+            onEditMedia = onEditAudioMedia,
+            onSavePreset = { presetName ->
+                val resolvedGenre = activeAudioGenre ?: inferAudioGenre(svara)
+                val saved = engine.saveUserPreset(
+                    name = presetName,
+                    domain = PresetDomain.AUDIO,
+                    audioGenre = resolvedGenre,
+                    svara = svara
                 )
-                val out = (drySample * (1.0 - currentWetMix) + wetSample * currentWetMix)
-                    .coerceIn(-0.999969, 0.999969)
-                val mag = abs(out).toFloat()
-                if (mag > framePeak) framePeak = mag
+                onPresetSaved(saved)
+                Toast.makeText(context, "Saved \"${saved.name}\"", Toast.LENGTH_SHORT).show()
+            },
+            onReset = {
+                onResetAudioToFlat()
+            },
+            saveDialogTitle = "Save Audio Preset",
+            defaultSaveName = engine.findPresetById(engine.activePresetId)
+                ?.takeIf { it.isUserCreated }
+                ?.name
+                .orEmpty(),
+            modifier = Modifier
+                .fillMaxWidth()
+                .weight(0.35f)
+        )
 
-                if (isFloat) {
-                    dst.putFloat(out.toFloat())
-                } else {
-                    dst.putShort((out * PCM16_OUT_SCALE).toInt().coerceIn(-32768, 32767).toShort())
+        // Bottom ~65%: Non-Scrolling Connected 4-Tab Svara Workspace
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .weight(0.65f)
+        ) {
+            ConnectedFolderTabs(
+                tabs = SvaraTabTitles,
+                selectedIndex = selectedTab,
+                onSelect = { selectedTab = it }
+            )
+
+            ConnectedFolderBody(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .weight(1f)
+            ) {
+                when (selectedTab) {
+                    0 -> ParametricEqTab(
+                        svara = svara,
+                        selectedBandIndex = selectedBandIndex,
+                        onSelectBand = { selectedBandIndex = it },
+                        onUpdateSvara = { engine.updateSvara(it) }
+                    )
+                    1 -> SoundContourTab(
+                        svara = svara,
+                        onUpdateSvara = { engine.updateSvara(it) }
+                    )
+                    2 -> DualAudioGlobesTab(
+                        svara = svara,
+                        onUpdateSvara = { engine.updateSvara(it) }
+                    )
+                    else -> CinemaSafetyTab(
+                        svara = svara,
+                        onUpdateSvara = { engine.updateSvara(it) }
+                    )
                 }
-                ch++
             }
+        }
+    }
+}
 
-            val bucket = ((frame * WAVEFORM_BARS) / frameCount).coerceIn(0, WAVEFORM_BARS - 1)
-            if (framePeak > waveformWork[bucket]) {
-                waveformWork[bucket] = framePeak
-            }
-            frame++
+// -----------------------------------------------------------------------------
+// Tab 1 — 10-Band Parametric EQ (Inspector Bar + Pinned Pre + 10 Band Faders)
+// -----------------------------------------------------------------------------
+
+@Composable
+private fun ParametricEqTab(
+    svara: SvaraParams,
+    selectedBandIndex: Int,
+    onSelectBand: (Int) -> Unit,
+    onUpdateSvara: (SvaraParams) -> Unit
+) {
+    val colors = LocalSynkaColors.current
+    val haptic = LocalHapticFeedback.current
+    val scrollState = rememberScrollState()
+
+    val bands = remember(svara.bands) {
+        val defaults = SvaraParams.DEFAULT_FREQUENCIES_HZ
+        List(defaults.size) { index ->
+            svara.bands.getOrElse(index) { EqBand(freqHz = defaults[index]) }.clamped()
         }
     }
 
-    private fun updateNightDialogueGain(peakAbs: Double, niLevel: Double): Double {
-        val coeff = if (peakAbs > niEnvelope) niAttackCoeff else niReleaseCoeff
-        niEnvelope = coeff * niEnvelope + (1.0 - coeff) * peakAbs
+    val safeIndex = selectedBandIndex.coerceIn(0, bands.lastIndex)
+    val activeBand = bands[safeIndex]
 
-        val env = niEnvelope
-        val desiredGain = when {
-            // Below noise floor: do not amplify silence hiss
-            env < 0.003 -> 1.0
-            // Quiet dialogue zone: gentle upward boost toward target level (0.14)
-            env < 0.14 -> {
-                val ratio = (0.14 / env).coerceAtMost(2.6) // Max +8.3 dB upward lift
-                val fadeIn = ((env - 0.003) / 0.015).coerceIn(0.0, 1.0)
-                1.0 + (ratio - 1.0) * niLevel * 0.75 * fadeIn
-            }
-            // Loud peak zone: downward compression above 0.36
-            env > 0.36 -> {
-                val compressed = 0.36 + (env - 0.36) * (1.0 - 0.72 * niLevel)
-                (compressed / env).coerceIn(0.25, 1.0)
-            }
-            else -> 1.0
+    fun updateBand(index: Int, transform: (EqBand) -> EqBand) {
+        val nextBands = List(bands.size) { i ->
+            if (i == index) transform(bands[i]).clamped() else bands[i]
         }
-
-        niGainSmooth += (desiredGain - niGainSmooth) * smoothCoeff
-        return niGainSmooth
+        onUpdateSvara(svara.copy(bands = nextBands))
     }
 
-    private fun updatePeakGuardGain(peakAbs: Double, arLevel: Double): Double {
-        val coeff = if (peakAbs > peakEnvelope) peakAttackCoeff else peakReleaseCoeff
-        peakEnvelope = coeff * peakEnvelope + (1.0 - coeff) * peakAbs
-
-        if (arLevel <= 1e-4 || peakEnvelope <= 0.88) {
-            return 1.0
-        }
-        // Gently pull sustained overload back toward 0.88 before hitting the tanh knee
-        val targetPeak = 0.88 + (peakEnvelope - 0.88) * (1.0 - 0.82 * arLevel)
-        return (targetPeak / peakEnvelope).coerceIn(0.15, 1.0)
-    }
-
-    private fun applyKneeTanh(
-        x: Double,
-        threshold: Double,
-        headroom: Double,
-        invHeadroom: Double
-    ): Double {
-        val ax = abs(x)
-        if (ax <= threshold) {
-            return x
-        }
-        val shaped = threshold + headroom * tanh((ax - threshold) * invHeadroom)
-        return if (x >= 0.0) shaped else -shaped
-    }
-
-    private fun syncStagedToActiveIfReady() {
-        val v1 = stagingVersion.get()
-        // Odd version means UI thread is mid-write; wait for next buffer without blocking
-        if ((v1 and 1) != 0) {
-            return
-        }
-
-        var i = 0
-        while (i < STAGE_COUNT) {
-            scratchB0[i] = stagingB0[i]
-            scratchB1[i] = stagingB1[i]
-            scratchB2[i] = stagingB2[i]
-            scratchA1[i] = stagingA1[i]
-            scratchA2[i] = stagingA2[i]
-            i++
-        }
-        val tmpPreAmp = stagingPreAmpGain
-        val tmpWidth = stagingStereoWidth
-        val tmpNi = stagingNightDialogue
-        val tmpAr = stagingAntiCrackle
-        val tmpBalL = stagingBalanceL
-        val tmpBalR = stagingBalanceR
-        val tmpBypassed = stagingBypassed
-
-        val v2 = stagingVersion.get()
-        if (v1 != v2) {
-            // Concurrent write happened during copy; discard scratch and retry on next buffer
-            return
-        }
-
-        var j = 0
-        while (j < STAGE_COUNT) {
-            b0[j] = scratchB0[j]
-            b1[j] = scratchB1[j]
-            b2[j] = scratchB2[j]
-            a1[j] = scratchA1[j]
-            a2[j] = scratchA2[j]
-            j++
-        }
-        targetPreAmpGain = tmpPreAmp
-        targetStereoWidth = tmpWidth
-        activeNightDialogue = tmpNi
-        activeAntiCrackle = tmpAr
-        targetBalanceL = tmpBalL
-        targetBalanceR = tmpBalR
-        targetWetMix = if (tmpBypassed) 0.0 else 1.0
-        dirty = false
-    }
-
-    private fun stageCoefficientsLocked(params: SvaraParams, bypassed: Boolean, sr: Int) {
-        val sampleRateD = sr.coerceAtLeast(8000).toDouble()
-        val maxFreq = max(MIN_FREQ_HZ, sampleRateD * NYQUIST_SAFETY_RATIO)
-
-        // Begin seqlock write (odd version)
-        stagingVersion.incrementAndGet()
-
-        // Stages 0..9: 10 parametric peaking filters + 5-zone contour additive offsets
-        var idx = 0
-        while (idx < 10) {
-            val band = params.bands[idx]
-            val zoneOffset = when (idx) {
-                0, 1 -> params.su
-                2, 3 -> params.mi
-                4, 5 -> params.vo
-                6, 7 -> params.tr
-                else -> params.ai
-            }
-            val totalGainDb = (band.gainDb + zoneOffset * CONTOUR_WEIGHT).coerceIn(-18.0, 18.0)
-            val fc = band.freqHz.toDouble().coerceIn(MIN_FREQ_HZ, maxFreq)
-            val q = band.q.toDouble().coerceIn(MIN_Q, MAX_Q)
-            computePeakingIntoStaging(idx, fc, q, totalGainDb, sampleRateD)
-            idx++
-        }
-
-        // Stage 10: Low-Shelf driven by bassDepthY (gain) and bassDepthX (cutoff & Q)
-        val lowShelfGainDb = (params.bassDepthY * 12.0).coerceIn(-12.0, 12.0)
-        val lowShelfFreq = (85.0 + params.bassDepthX * 35.0).coerceIn(MIN_FREQ_HZ, maxFreq)
-        val lowShelfQ = (0.707 + (params.bassDepthX + 1.0) * 0.15).coerceIn(MIN_Q, MAX_Q)
-        computeLowShelfIntoStaging(10, lowShelfFreq, lowShelfQ, lowShelfGainDb, sampleRateD)
-
-        // Stage 11: High-Shelf driven by airWidthY
-        val highShelfGainDb = (params.airWidthY * 12.0).coerceIn(-12.0, 12.0)
-        val highShelfFreq = 9000.0.coerceIn(MIN_FREQ_HZ, maxFreq)
-        computeHighShelfIntoStaging(11, highShelfFreq, 0.707, highShelfGainDb, sampleRateD)
-
-        // Pre-amp, stereo width, safety & L/R balance scalars
-        stagingPreAmpGain = 10.0.pow(params.preAmpDb.toDouble().coerceIn(-12.0, 12.0) / 20.0)
-        stagingStereoWidth = (1.0 + params.airWidthX * 0.45 + params.bassDepthX * 0.10)
-            .coerceIn(0.45, 1.55)
-        stagingNightDialogue = (params.nightDialogue / 100.0).coerceIn(0.0, 1.0)
-        stagingAntiCrackle = (params.antiCrackle / 100.0).coerceIn(0.0, 1.0)
-
-        val bal = (params.lrBalance / 100.0).coerceIn(-1.0, 1.0)
-        stagingBalanceL = if (bal > 0.0) (1.0 - bal) else 1.0
-        stagingBalanceR = if (bal < 0.0) (1.0 + bal) else 1.0
-        stagingBypassed = bypassed
-
-        // Complete seqlock write (even version) and signal audio thread
-        stagingVersion.incrementAndGet()
-        dirty = true
-    }
-
-    private fun computePeakingIntoStaging(
-        stage: Int,
-        fc: Double,
-        q: Double,
-        gainDb: Double,
-        sampleRate: Double
+    Column(
+        modifier = Modifier.fillMaxSize(),
+        verticalArrangement = Arrangement.spacedBy(8.dp)
     ) {
-        if (abs(gainDb) < 0.001) {
-            writeIdentityStaging(stage)
-            return
-        }
-        val a = 10.0.pow(gainDb / 40.0)
-        val w0 = 2.0 * PI * fc / sampleRate
-        val cosW0 = cos(w0)
-        val sinW0 = sin(w0)
-        val alpha = sinW0 / (2.0 * q)
+        // Compact Selected Band Inspector Bar: Band Freq | -/+ Hz | -/+ Q | ↺ Reset
+        SelectedBandInspectorBar(
+            bandIndex = safeIndex,
+            band = activeBand,
+            onStepFreq = { deltaSign ->
+                haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                updateBand(safeIndex) { b ->
+                    val nextFreq = stepBandFrequency(b.freqHz, deltaSign)
+                    b.copy(freqHz = nextFreq)
+                }
+            },
+            onStepQ = { deltaSign ->
+                haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                updateBand(safeIndex) { b ->
+                    val nextQ = stepBandQ(b.q, deltaSign)
+                    b.copy(q = nextQ)
+                }
+            },
+            onResetBand = {
+                haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                val defaultFreq = SvaraParams.DEFAULT_FREQUENCIES_HZ[safeIndex]
+                updateBand(safeIndex) {
+                    EqBand(freqHz = defaultFreq, q = 1.4f, gainDb = 0f)
+                }
+            }
+        )
 
-        val a0 = 1.0 + alpha / a
-        writeNormalizedStaging(
-            stage = stage,
-            rawB0 = 1.0 + alpha * a,
-            rawB1 = -2.0 * cosW0,
-            rawB2 = 1.0 - alpha * a,
-            rawA0 = a0,
-            rawA1 = -2.0 * cosW0,
-            rawA2 = 1.0 - alpha / a
+        // Pinned Far-Left Pre-Amp + Horizontally Scrollable 10-Band Rack
+        BoxWithConstraints(
+            modifier = Modifier
+                .fillMaxWidth()
+                .weight(1f)
+        ) {
+            val railHeight = (maxHeight - 80.dp).coerceIn(84.dp, 200.dp)
+
+            Column(
+                modifier = Modifier.fillMaxSize(),
+                verticalArrangement = Arrangement.spacedBy(4.dp)
+            ) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .weight(1f),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    // Pinned Far-Left Pre-Amp Vertical Fader (-12..+12 dB)
+                    ParametricEqVerticalFader(
+                        value = svara.preAmpDb,
+                        onValueChange = { onUpdateSvara(svara.copy(preAmpDb = it)) },
+                        onDoubleTapReset = { onUpdateSvara(svara.copy(preAmpDb = 0f)) },
+                        label = "Pre",
+                        valueRange = -12f..12f,
+                        trackHeight = railHeight,
+                        accentColor = if (svara.preAmpDb > 6f) SynkaPalette.SindoorCrimson else colors.activeAccent,
+                        yieldHorizontalScroll = false,
+                        modifier = Modifier.width(46.dp),
+                        topNode = {
+                            Box(
+                                modifier = Modifier
+                                    .size(20.dp)
+                                    .clip(CircleShape)
+                                    .background(colors.elevatedSurface)
+                                    .border(1.dp, colors.hairline, CircleShape),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Text(
+                                    text = "dB",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    fontSize = 8.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = colors.secondaryText
+                                )
+                            }
+                        }
+                    )
+
+                    // Subtle separator between pinned Pre-Amp and scrollable 10-band rack
+                    Box(
+                        modifier = Modifier
+                            .padding(horizontal = 4.dp, vertical = 10.dp)
+                            .width(1.dp)
+                            .fillMaxHeight()
+                            .background(colors.hairline)
+                    )
+
+                    // 10-Band Parametric Fader Bank (48dp per column — clean touch spacing on 360dp)
+                    Row(
+                        modifier = Modifier
+                            .weight(1f)
+                            .fillMaxHeight()
+                            .horizontalScroll(scrollState),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(2.dp)
+                    ) {
+                        bands.forEachIndexed { idx, band ->
+                            val isSelected = idx == safeIndex
+                            val defaultFreq = SvaraParams.DEFAULT_FREQUENCIES_HZ[idx]
+                            val isTuned = abs(band.freqHz - defaultFreq) >= 1f || abs(band.q - 1.4f) >= 0.05f
+
+                            ParametricEqVerticalFader(
+                                value = band.gainDb,
+                                onValueChange = { newGain ->
+                                    if (safeIndex != idx) onSelectBand(idx)
+                                    updateBand(idx) { it.copy(gainDb = newGain) }
+                                },
+                                onDoubleTapReset = {
+                                    if (safeIndex != idx) onSelectBand(idx)
+                                    updateBand(idx) { it.copy(gainDb = 0f) }
+                                },
+                                label = formatBandShortFreq(band.freqHz),
+                                valueRange = -18f..18f,
+                                trackHeight = railHeight,
+                                accentColor = if (isSelected) colors.activeAccentStrong else colors.activeAccent,
+                                isHighlighted = isSelected,
+                                yieldHorizontalScroll = true,
+                                modifier = Modifier.width(48.dp),
+                                topNode = {
+                                    BandSelectionNode(
+                                        selected = isSelected,
+                                        hasCustomFreqOrQ = isTuned,
+                                        onClick = {
+                                            haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                                            onSelectBand(idx)
+                                        }
+                                    )
+                                }
+                            )
+                        }
+                    }
+                }
+
+                // Slim horizontal scroll progress indicator (visible only when bank overflows width)
+                if (scrollState.maxValue > 0) {
+                    val progress = (scrollState.value.toFloat() / scrollState.maxValue.toFloat()).coerceIn(0f, 1f)
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(start = 56.dp, end = 4.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Canvas(
+                            modifier = Modifier
+                                .weight(1f)
+                                .height(3.dp)
+                        ) {
+                            drawRoundRect(
+                                color = colors.hairline,
+                                size = size,
+                                cornerRadius = CornerRadius(size.height * 0.5f, size.height * 0.5f)
+                            )
+                            val thumbW = (size.width * 0.45f).coerceAtLeast(24.dp.toPx())
+                            val thumbX = (size.width - thumbW) * progress
+                            drawRoundRect(
+                                color = colors.activeAccent.copy(alpha = 0.8f),
+                                topLeft = Offset(thumbX, 0f),
+                                size = Size(thumbW, size.height),
+                                cornerRadius = CornerRadius(size.height * 0.5f, size.height * 0.5f)
+                            )
+                        }
+                        Text(
+                            text = "31Hz ↔ 16kHz",
+                            style = MaterialTheme.typography.labelSmall,
+                            fontSize = 9.sp,
+                            color = colors.secondaryText
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun SelectedBandInspectorBar(
+    bandIndex: Int,
+    band: EqBand,
+    onStepFreq: (Int) -> Unit,
+    onStepQ: (Int) -> Unit,
+    onResetBand: () -> Unit
+) {
+    val colors = LocalSynkaColors.current
+    val shape = RoundedCornerShape(12.dp)
+
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(shape)
+            .background(colors.background)
+            .border(1.dp, colors.hairline, shape)
+            .padding(horizontal = 8.dp, vertical = 6.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(6.dp)
+    ) {
+        // Band badge (B1..B10)
+        Box(
+            modifier = Modifier
+                .clip(RoundedCornerShape(8.dp))
+                .background(colors.elevatedSurface)
+                .border(1.dp, colors.activeAccent.copy(alpha = 0.6f), RoundedCornerShape(8.dp))
+                .padding(horizontal = 6.dp, vertical = 5.dp),
+            contentAlignment = Alignment.Center
+        ) {
+            Text(
+                text = "B${bandIndex + 1}",
+                style = MaterialTheme.typography.labelSmall,
+                fontWeight = FontWeight.Bold,
+                color = colors.activeAccentStrong
+            )
+        }
+
+        // Frequency (Hz) Stepper
+        CompactStepperPill(
+            valueText = formatBandInspectorFreq(band.freqHz),
+            onDecrement = { onStepFreq(-1) },
+            onIncrement = { onStepFreq(+1) },
+            modifier = Modifier.weight(1.18f)
+        )
+
+        // Q-Factor Stepper
+        CompactStepperPill(
+            valueText = "Q ${String.format(Locale.US, "%.1f", band.q)}",
+            onDecrement = { onStepQ(-1) },
+            onIncrement = { onStepQ(+1) },
+            modifier = Modifier.weight(0.96f)
+        )
+
+        // ↺ Reset Selected Band Button
+        Box(
+            modifier = Modifier
+                .size(30.dp)
+                .clip(RoundedCornerShape(9.dp))
+                .background(colors.elevatedSurface)
+                .border(1.dp, colors.hairline, RoundedCornerShape(9.dp))
+                .clickable(onClick = onResetBand),
+            contentAlignment = Alignment.Center
+        ) {
+            BandResetArcIcon(
+                color = colors.primaryText,
+                modifier = Modifier.size(14.dp)
+            )
+        }
+    }
+}
+
+@Composable
+private fun CompactStepperPill(
+    valueText: String,
+    onDecrement: () -> Unit,
+    onIncrement: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    val colors = LocalSynkaColors.current
+    val shape = RoundedCornerShape(9.dp)
+
+    Row(
+        modifier = modifier
+            .height(30.dp)
+            .clip(shape)
+            .background(colors.surface)
+            .border(1.dp, colors.hairline, shape),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Box(
+            modifier = Modifier
+                .width(26.dp)
+                .fillMaxHeight()
+                .clickable(onClick = onDecrement),
+            contentAlignment = Alignment.Center
+        ) {
+            Text(
+                text = "−",
+                style = MaterialTheme.typography.labelMedium,
+                fontWeight = FontWeight.Bold,
+                color = colors.primaryText
+            )
+        }
+
+        Box(
+            modifier = Modifier
+                .weight(1f)
+                .fillMaxHeight(),
+            contentAlignment = Alignment.Center
+        ) {
+            Text(
+                text = valueText,
+                style = MaterialTheme.typography.labelSmall,
+                fontSize = 10.sp,
+                fontWeight = FontWeight.SemiBold,
+                color = colors.primaryText,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+        }
+
+        Box(
+            modifier = Modifier
+                .width(26.dp)
+                .fillMaxHeight()
+                .clickable(onClick = onIncrement),
+            contentAlignment = Alignment.Center
+        ) {
+            Text(
+                text = "+",
+                style = MaterialTheme.typography.labelMedium,
+                fontWeight = FontWeight.Bold,
+                color = colors.primaryText
+            )
+        }
+    }
+}
+
+@Composable
+private fun BandSelectionNode(
+    selected: Boolean,
+    hasCustomFreqOrQ: Boolean,
+    onClick: () -> Unit
+) {
+    val colors = LocalSynkaColors.current
+
+    Box(
+        modifier = Modifier
+            .size(22.dp)
+            .clip(CircleShape)
+            .background(if (selected) colors.activeAccent else colors.background)
+            .border(
+                width = if (selected) 1.6.dp else 1.2.dp,
+                color = when {
+                    selected -> colors.activeAccentStrong
+                    hasCustomFreqOrQ -> colors.activeAccent.copy(alpha = 0.7f)
+                    else -> colors.hairline
+                },
+                shape = CircleShape
+            )
+            .clickable(onClick = onClick),
+        contentAlignment = Alignment.Center
+    ) {
+        if (selected) {
+            Box(
+                modifier = Modifier
+                    .size(7.dp)
+                    .clip(CircleShape)
+                    .background(SynkaPalette.ObsidianCharcoal)
+            )
+        } else if (hasCustomFreqOrQ) {
+            Box(
+                modifier = Modifier
+                    .size(5.dp)
+                    .clip(CircleShape)
+                    .background(colors.activeAccent)
+            )
+        }
+    }
+}
+
+/**
+ * Parametric vertical fader matching [StudioVerticalFader]'s visuals and haptics while adding
+ * directional gesture disambiguation so horizontal swipes pan the 10-band rack cleanly.
+ */
+@Composable
+private fun ParametricEqVerticalFader(
+    value: Float,
+    onValueChange: (Float) -> Unit,
+    onDoubleTapReset: () -> Unit,
+    label: String,
+    valueRange: ClosedFloatingPointRange<Float>,
+    trackHeight: Dp,
+    accentColor: Color,
+    yieldHorizontalScroll: Boolean,
+    modifier: Modifier = Modifier,
+    isHighlighted: Boolean = false,
+    topNode: (@Composable () -> Unit)? = null
+) {
+    val colors = LocalSynkaColors.current
+    val haptic = LocalHapticFeedback.current
+
+    val currentValue by rememberUpdatedState(value)
+    val currentRange by rememberUpdatedState(valueRange)
+    val currentOnChange by rememberUpdatedState(onValueChange)
+    val currentOnReset by rememberUpdatedState(onDoubleTapReset)
+
+    val clampedValue = value.coerceIn(valueRange.start, valueRange.endInclusive)
+
+    Column(
+        modifier = modifier
+            .clip(RoundedCornerShape(10.dp))
+            .background(
+                if (isHighlighted) colors.elevatedSurface.copy(alpha = 0.55f) else Color.Transparent
+            )
+            .padding(vertical = 3.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy(4.dp)
+    ) {
+        if (topNode != null) {
+            Box(
+                modifier = Modifier.height(24.dp),
+                contentAlignment = Alignment.Center
+            ) {
+                topNode()
+            }
+        }
+
+        // Numeric dB readout (+2, 0, -3)
+        Text(
+            text = formatStudioIntegerReadout(clampedValue),
+            style = MaterialTheme.typography.labelMedium,
+            fontSize = 10.sp,
+            fontWeight = if (abs(clampedValue) > 0.05f) FontWeight.Bold else FontWeight.Medium,
+            color = if (abs(clampedValue) > 0.05f) accentColor else colors.secondaryText,
+            maxLines = 1
+        )
+
+        Canvas(
+            modifier = Modifier
+                .width(42.dp)
+                .height(trackHeight)
+                .pointerInput(yieldHorizontalScroll) {
+                    var lastTapUpMs = 0L
+                    var lastTapPos = Offset.Zero
+                    val dragSlopPx = 4.dp.toPx()
+                    val padPx = 11.dp.toPx()
+                    val doubleTapTimeoutMs = viewConfiguration.doubleTapTimeoutMillis
+                    val doubleTapSlopPx = viewConfiguration.touchSlop * 2.5f
+
+                    awaitEachGesture {
+                        val down = awaitFirstDown(requireUnconsumed = false)
+                        val pointerId = down.id
+                        val downPos = down.position
+                        var isVerticalDrag = false
+                        var lastEmitted = currentValue
+                        val span = (currentRange.endInclusive - currentRange.start).coerceAtLeast(0.0001f)
+                        val snapBand = span * 0.015f
+                        var prevSign = eqSignBucket(lastEmitted, snapBand * 0.5f)
+
+                        while (true) {
+                            val event = awaitPointerEvent()
+                            val change = event.changes.firstOrNull { it.id == pointerId } ?: break
+
+                            if (!change.pressed) {
+                                if (!isVerticalDrag) {
+                                    val now = SystemClock.uptimeMillis()
+                                    val isDoubleTap = lastTapUpMs > 0L &&
+                                        (now - lastTapUpMs) <= doubleTapTimeoutMs &&
+                                        (downPos - lastTapPos).getDistance() <= doubleTapSlopPx
+                                    if (isDoubleTap) {
+                                        change.consume()
+                                        lastTapUpMs = 0L
+                                        haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                                        currentOnReset()
+                                    } else {
+                                        lastTapUpMs = now
+                                        lastTapPos = downPos
+                                    }
+                                }
+                                break
+                            }
+
+                            val dx = abs(change.position.x - downPos.x)
+                            val dy = abs(change.position.y - downPos.y)
+
+                            if (!isVerticalDrag) {
+                                // Yield to horizontalScroll if user intends to pan across the 10-band rack
+                                if (yieldHorizontalScroll && dx > viewConfiguration.touchSlop * 0.75f && dx > dy * 1.2f) {
+                                    break
+                                }
+                                if (dy > dragSlopPx && (!yieldHorizontalScroll || dy >= dx * 0.8f)) {
+                                    isVerticalDrag = true
+                                    lastTapUpMs = 0L
+                                }
+                            }
+
+                            if (isVerticalDrag) {
+                                change.consume()
+                                val usableH = (size.height - padPx * 2f).coerceAtLeast(1f)
+                                val frac = (1f - ((change.position.y - padPx) / usableH)).coerceIn(0f, 1f)
+                                var mapped = currentRange.start + frac * span
+                                if (abs(mapped) <= snapBand) {
+                                    mapped = 0f
+                                }
+                                mapped = mapped.coerceIn(currentRange.start, currentRange.endInclusive)
+
+                                val nextSign = eqSignBucket(mapped, snapBand * 0.5f)
+                                if (nextSign != prevSign && (nextSign == 0 || (prevSign != 0 && prevSign == -nextSign))) {
+                                    haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                                }
+                                prevSign = nextSign
+
+                                if (mapped != lastEmitted) {
+                                    lastEmitted = mapped
+                                    currentOnChange(mapped)
+                                }
+                            }
+                        }
+                    }
+                }
+        ) {
+            val padY = 11.dp.toPx()
+            val usableH = (size.height - padY * 2f).coerceAtLeast(1f)
+            val centerX = size.width * 0.5f
+            val railW = 5.5.dp.toPx()
+            val railLeft = centerX - railW * 0.5f
+
+            val span = (valueRange.endInclusive - valueRange.start).coerceAtLeast(0.0001f)
+            val normVal = ((clampedValue - valueRange.start) / span).coerceIn(0f, 1f)
+            val thumbY = padY + (1f - normVal) * usableH
+
+            val normZero = ((0f - valueRange.start) / span).coerceIn(0f, 1f)
+            val zeroY = padY + (1f - normZero) * usableH
+
+            // Center zero-tick calibration line
+            drawLine(
+                color = colors.secondaryText.copy(alpha = 0.48f),
+                start = Offset(centerX - 12.dp.toPx(), zeroY),
+                end = Offset(centerX + 12.dp.toPx(), zeroY),
+                strokeWidth = 1.dp.toPx(),
+                cap = StrokeCap.Round
+            )
+
+            // Recessed vertical rail
+            drawRoundRect(
+                color = SynkaPalette.ObsidianCharcoal,
+                topLeft = Offset(railLeft, padY),
+                size = Size(railW, usableH),
+                cornerRadius = CornerRadius(railW * 0.5f, railW * 0.5f)
+            )
+            drawRoundRect(
+                color = colors.hairline,
+                topLeft = Offset(railLeft, padY),
+                size = Size(railW, usableH),
+                cornerRadius = CornerRadius(railW * 0.5f, railW * 0.5f),
+                style = Stroke(width = 1.dp.toPx())
+            )
+
+            // Active fill from zero line to thumb
+            val fillTop = minOf(zeroY, thumbY)
+            val fillBottom = maxOf(zeroY, thumbY)
+            val fillHeight = (fillBottom - fillTop).coerceAtLeast(0f)
+            if (fillHeight > 0.5f) {
+                drawRoundRect(
+                    color = accentColor,
+                    topLeft = Offset(railLeft, fillTop),
+                    size = Size(railW, fillHeight),
+                    cornerRadius = CornerRadius(railW * 0.5f, railW * 0.5f)
+                )
+            }
+
+            // Tactile fader cap
+            val capW = 22.dp.toPx()
+            val capH = 13.dp.toPx()
+            val capLeft = centerX - capW * 0.5f
+            val capTop = thumbY - capH * 0.5f
+
+            drawRoundRect(
+                color = colors.elevatedSurface,
+                topLeft = Offset(capLeft, capTop),
+                size = Size(capW, capH),
+                cornerRadius = CornerRadius(4.5.dp.toPx(), 4.5.dp.toPx())
+            )
+            drawRoundRect(
+                color = if (abs(clampedValue) > 0.05f || isHighlighted) {
+                    accentColor
+                } else {
+                    colors.primaryText.copy(alpha = 0.45f)
+                },
+                topLeft = Offset(capLeft, capTop),
+                size = Size(capW, capH),
+                cornerRadius = CornerRadius(4.5.dp.toPx(), 4.5.dp.toPx()),
+                style = Stroke(width = 1.2.dp.toPx())
+            )
+            drawLine(
+                color = colors.primaryText.copy(alpha = 0.85f),
+                start = Offset(capLeft + 4.5.dp.toPx(), thumbY),
+                end = Offset(capLeft + capW - 4.5.dp.toPx(), thumbY),
+                strokeWidth = 1.3.dp.toPx(),
+                cap = StrokeCap.Round
+            )
+        }
+
+        Text(
+            text = label,
+            style = MaterialTheme.typography.labelSmall,
+            fontSize = 10.sp,
+            fontWeight = if (isHighlighted) FontWeight.Bold else FontWeight.SemiBold,
+            color = if (isHighlighted) colors.activeAccentStrong else colors.primaryText,
+            textAlign = TextAlign.Center,
+            maxLines = 1
         )
     }
+}
 
-    private fun computeLowShelfIntoStaging(
-        stage: Int,
-        fc: Double,
-        q: Double,
-        gainDb: Double,
-        sampleRate: Double
+// -----------------------------------------------------------------------------
+// Tab 2 — 5-Zone Sound Contour (SU, MI, VO, TR, AI)
+// -----------------------------------------------------------------------------
+
+@Composable
+private fun SoundContourTab(
+    svara: SvaraParams,
+    onUpdateSvara: (SvaraParams) -> Unit
+) {
+    val colors = LocalSynkaColors.current
+
+    Column(
+        modifier = Modifier.fillMaxSize(),
+        verticalArrangement = Arrangement.spacedBy(8.dp)
     ) {
-        if (abs(gainDb) < 0.001) {
-            writeIdentityStaging(stage)
-            return
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                text = "5-ZONE SOUND CONTOUR (dB)",
+                style = MaterialTheme.typography.labelSmall,
+                color = colors.secondaryText
+            )
+            Text(
+                text = "Double-tap to zero",
+                style = MaterialTheme.typography.labelSmall,
+                fontSize = 9.sp,
+                color = colors.secondaryText
+            )
         }
-        val a = 10.0.pow(gainDb / 40.0)
-        val w0 = 2.0 * PI * fc / sampleRate
-        val cosW0 = cos(w0)
-        val sinW0 = sin(w0)
-        val alpha = sinW0 / (2.0 * q)
-        val twoSqrtAAlpha = 2.0 * sqrt(a) * alpha
-        val aPlus1 = a + 1.0
-        val aMinus1 = a - 1.0
 
-        writeNormalizedStaging(
-            stage = stage,
-            rawB0 = a * (aPlus1 - aMinus1 * cosW0 + twoSqrtAAlpha),
-            rawB1 = 2.0 * a * (aMinus1 - aPlus1 * cosW0),
-            rawB2 = a * (aPlus1 - aMinus1 * cosW0 - twoSqrtAAlpha),
-            rawA0 = aPlus1 + aMinus1 * cosW0 + twoSqrtAAlpha,
-            rawA1 = -2.0 * (aMinus1 + aPlus1 * cosW0),
-            rawA2 = aPlus1 + aMinus1 * cosW0 - twoSqrtAAlpha
+        BoxWithConstraints(
+            modifier = Modifier
+                .fillMaxWidth()
+                .weight(1f)
+        ) {
+            val railHeight = (maxHeight - 78.dp).coerceIn(92.dp, 220.dp)
+
+            Row(
+                modifier = Modifier.fillMaxSize(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceEvenly
+            ) {
+                StudioVerticalFader(
+                    value = svara.su,
+                    onValueChange = { onUpdateSvara(svara.copy(su = it)) },
+                    onDoubleTapReset = { onUpdateSvara(svara.copy(su = 0f)) },
+                    label = "SU",
+                    subLabel = "Sub-Rumble",
+                    valueRange = -12f..12f,
+                    trackHeight = railHeight,
+                    valueFormatter = ::formatStudioDecimalReadout,
+                    modifier = Modifier.weight(1f)
+                )
+
+                StudioVerticalFader(
+                    value = svara.mi,
+                    onValueChange = { onUpdateSvara(svara.copy(mi = it)) },
+                    onDoubleTapReset = { onUpdateSvara(svara.copy(mi = 0f)) },
+                    label = "MI",
+                    subLabel = "Mid-Bass",
+                    valueRange = -12f..12f,
+                    trackHeight = railHeight,
+                    valueFormatter = ::formatStudioDecimalReadout,
+                    modifier = Modifier.weight(1f)
+                )
+
+                StudioVerticalFader(
+                    value = svara.vo,
+                    onValueChange = { onUpdateSvara(svara.copy(vo = it)) },
+                    onDoubleTapReset = { onUpdateSvara(svara.copy(vo = 0f)) },
+                    label = "VO",
+                    subLabel = "Vocals",
+                    valueRange = -12f..12f,
+                    trackHeight = railHeight,
+                    valueFormatter = ::formatStudioDecimalReadout,
+                    modifier = Modifier.weight(1f)
+                )
+
+                StudioVerticalFader(
+                    value = svara.tr,
+                    onValueChange = { onUpdateSvara(svara.copy(tr = it)) },
+                    onDoubleTapReset = { onUpdateSvara(svara.copy(tr = 0f)) },
+                    label = "TR",
+                    subLabel = "Treble",
+                    valueRange = -12f..12f,
+                    trackHeight = railHeight,
+                    valueFormatter = ::formatStudioDecimalReadout,
+                    modifier = Modifier.weight(1f)
+                )
+
+                StudioVerticalFader(
+                    value = svara.ai,
+                    onValueChange = { onUpdateSvara(svara.copy(ai = it)) },
+                    onDoubleTapReset = { onUpdateSvara(svara.copy(ai = 0f)) },
+                    label = "AI",
+                    subLabel = "Air",
+                    valueRange = -12f..12f,
+                    trackHeight = railHeight,
+                    valueFormatter = ::formatStudioDecimalReadout,
+                    modifier = Modifier.weight(1f)
+                )
+            }
+        }
+    }
+}
+
+// -----------------------------------------------------------------------------
+// Tab 3 — Dual Tone & Bass Globes (Bass Punch & Depth | Soundstage Width & Air)
+// -----------------------------------------------------------------------------
+
+@Composable
+private fun DualAudioGlobesTab(
+    svara: SvaraParams,
+    onUpdateSvara: (SvaraParams) -> Unit
+) {
+    val colors = LocalSynkaColors.current
+
+    Column(
+        modifier = Modifier.fillMaxSize(),
+        verticalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                text = "DUAL ACOUSTIC GLOBES",
+                style = MaterialTheme.typography.labelSmall,
+                color = colors.secondaryText
+            )
+            Text(
+                text = "Double-tap globe to recenter",
+                style = MaterialTheme.typography.labelSmall,
+                fontSize = 9.sp,
+                color = colors.secondaryText
+            )
+        }
+
+        BoxWithConstraints(
+            modifier = Modifier
+                .fillMaxWidth()
+                .weight(1f),
+            contentAlignment = Alignment.Center
+        ) {
+            val maxPerGlobeW = (maxWidth - 18.dp) / 2f
+            val maxPerGlobeH = (maxHeight - 54.dp).coerceAtLeast(92.dp)
+            val globeWidth = minOf(maxPerGlobeW, maxPerGlobeH).coerceAtLeast(92.dp)
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceEvenly,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    YantraGlobe(
+                        label = "Bass Punch & Depth",
+                        x = svara.bassDepthX,
+                        y = svara.bassDepthY,
+                        onChange = { nx, ny ->
+                            onUpdateSvara(svara.copy(bassDepthX = nx, bassDepthY = ny))
+                        },
+                        onDoubleTapReset = {
+                            onUpdateSvara(svara.copy(bassDepthX = 0f, bassDepthY = 0f))
+                        },
+                        modifier = Modifier.width(globeWidth)
+                    )
+                    Text(
+                        text = "X Depth  •  Y Punch",
+                        style = MaterialTheme.typography.labelSmall,
+                        fontSize = 9.sp,
+                        color = colors.secondaryText
+                    )
+                }
+
+                Column(
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    YantraGlobe(
+                        label = "Soundstage & Air",
+                        x = svara.airWidthX,
+                        y = svara.airWidthY,
+                        onChange = { nx, ny ->
+                            onUpdateSvara(svara.copy(airWidthX = nx, airWidthY = ny))
+                        },
+                        onDoubleTapReset = {
+                            onUpdateSvara(svara.copy(airWidthX = 0f, airWidthY = 0f))
+                        },
+                        modifier = Modifier.width(globeWidth)
+                    )
+                    Text(
+                        text = "X Width  •  Y Air",
+                        style = MaterialTheme.typography.labelSmall,
+                        fontSize = 9.sp,
+                        color = colors.secondaryText
+                    )
+                }
+            }
+        }
+    }
+}
+
+// -----------------------------------------------------------------------------
+// Tab 4 — Cinema & Ear Safety (Ni, Ar, Li)
+// -----------------------------------------------------------------------------
+
+@Composable
+private fun CinemaSafetyTab(
+    svara: SvaraParams,
+    onUpdateSvara: (SvaraParams) -> Unit
+) {
+    val colors = LocalSynkaColors.current
+
+    Column(
+        modifier = Modifier.fillMaxSize(),
+        verticalArrangement = Arrangement.SpaceBetween
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                text = "CINEMA & EAR SAFETY",
+                style = MaterialTheme.typography.labelSmall,
+                color = colors.secondaryText
+            )
+            Text(
+                text = "Double-tap slider for default",
+                style = MaterialTheme.typography.labelSmall,
+                fontSize = 9.sp,
+                color = colors.secondaryText
+            )
+        }
+
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .weight(1f),
+            verticalArrangement = Arrangement.SpaceEvenly
+        ) {
+            Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                StudioHorizontalSlider(
+                    label = "Ni  •  Night Dialogue Boost",
+                    value = svara.nightDialogue,
+                    onValueChange = { onUpdateSvara(svara.copy(nightDialogue = it)) },
+                    onDoubleTapReset = { onUpdateSvara(svara.copy(nightDialogue = 0f)) },
+                    valueRange = 0f..100f,
+                    defaultValue = 0f,
+                    accentColor = colors.activeAccent,
+                    valueFormatter = ::formatSvaraPercent
+                )
+                Text(
+                    text = "Lifts speech clarity and softens sudden loud peaks for late-night listening.",
+                    style = MaterialTheme.typography.labelSmall,
+                    fontSize = 10.sp,
+                    color = colors.secondaryText
+                )
+            }
+
+            HorizontalDivider(thickness = 1.dp, color = colors.hairline)
+
+            Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                StudioHorizontalSlider(
+                    label = "Ar  •  Anti-Crackle Limiter",
+                    value = svara.antiCrackle,
+                    onValueChange = { onUpdateSvara(svara.copy(antiCrackle = it)) },
+                    onDoubleTapReset = { onUpdateSvara(svara.copy(antiCrackle = 75f)) },
+                    valueRange = 0f..100f,
+                    defaultValue = 75f,
+                    accentColor = SynkaPalette.KansaBronze,
+                    valueFormatter = ::formatSvaraPercent
+                )
+                Text(
+                    text = "Soft-knee dynamic ceiling prevents digital clipping under heavy EQ boosts.",
+                    style = MaterialTheme.typography.labelSmall,
+                    fontSize = 10.sp,
+                    color = colors.secondaryText
+                )
+            }
+
+            HorizontalDivider(thickness = 1.dp, color = colors.hairline)
+
+            Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                StudioHorizontalSlider(
+                    label = "Li  •  L/R Ear Balance",
+                    value = svara.lrBalance,
+                    onValueChange = { onUpdateSvara(svara.copy(lrBalance = it)) },
+                    onDoubleTapReset = { onUpdateSvara(svara.copy(lrBalance = 0f)) },
+                    valueRange = -100f..100f,
+                    defaultValue = 0f,
+                    accentColor = colors.activeAccentStrong,
+                    valueFormatter = ::formatLrBalanceReadout
+                )
+                Text(
+                    text = "Compensates for left/right IEM driver variance or ear sensitivity.",
+                    style = MaterialTheme.typography.labelSmall,
+                    fontSize = 10.sp,
+                    color = colors.secondaryText
+                )
+            }
+        }
+    }
+}
+
+// -----------------------------------------------------------------------------
+// Vector Icon & Parametric Math / Formatting Helpers
+// -----------------------------------------------------------------------------
+
+@Composable
+private fun BandResetArcIcon(
+    color: Color,
+    modifier: Modifier = Modifier
+) {
+    Canvas(modifier = modifier) {
+        val w = size.width
+        val h = size.height
+        val stroke = Stroke(width = 1.5.dp.toPx(), cap = StrokeCap.Round, join = StrokeJoin.Round)
+        val pad = w * 0.16f
+        drawArc(
+            color = color,
+            startAngle = -140f,
+            sweepAngle = 285f,
+            useCenter = false,
+            topLeft = Offset(pad, pad),
+            size = Size(w - pad * 2f, h - pad * 2f),
+            style = stroke
         )
-    }
-
-    private fun computeHighShelfIntoStaging(
-        stage: Int,
-        fc: Double,
-        q: Double,
-        gainDb: Double,
-        sampleRate: Double
-    ) {
-        if (abs(gainDb) < 0.001) {
-            writeIdentityStaging(stage)
-            return
+        val head = Path().apply {
+            moveTo(w * 0.14f, h * 0.18f)
+            lineTo(w * 0.14f, h * 0.42f)
+            lineTo(w * 0.38f, h * 0.42f)
         }
-        val a = 10.0.pow(gainDb / 40.0)
-        val w0 = 2.0 * PI * fc / sampleRate
-        val cosW0 = cos(w0)
-        val sinW0 = sin(w0)
-        val alpha = sinW0 / (2.0 * q)
-        val twoSqrtAAlpha = 2.0 * sqrt(a) * alpha
-        val aPlus1 = a + 1.0
-        val aMinus1 = a - 1.0
-
-        writeNormalizedStaging(
-            stage = stage,
-            rawB0 = a * (aPlus1 + aMinus1 * cosW0 + twoSqrtAAlpha),
-            rawB1 = -2.0 * a * (aMinus1 + aPlus1 * cosW0),
-            rawB2 = a * (aPlus1 + aMinus1 * cosW0 - twoSqrtAAlpha),
-            rawA0 = aPlus1 - aMinus1 * cosW0 + twoSqrtAAlpha,
-            rawA1 = 2.0 * (aMinus1 - aPlus1 * cosW0),
-            rawA2 = aPlus1 - aMinus1 * cosW0 - twoSqrtAAlpha
-        )
+        drawPath(path = head, color = color, style = stroke)
     }
+}
 
-    private fun writeNormalizedStaging(
-        stage: Int,
-        rawB0: Double,
-        rawB1: Double,
-        rawB2: Double,
-        rawA0: Double,
-        rawA1: Double,
-        rawA2: Double
-    ) {
-        if (!rawA0.isFinite() || abs(rawA0) < 1e-12) {
-            writeIdentityStaging(stage)
-            return
+private fun stepBandFrequency(currentHz: Float, sign: Int): Float {
+    val step = when {
+        currentHz < 50f -> 2f
+        currentHz < 120f -> 5f
+        currentHz < 500f -> 10f
+        currentHz < 2000f -> 50f
+        currentHz < 6000f -> 100f
+        else -> 250f
+    }
+    val next = currentHz + (step * sign)
+    return next.coerceIn(20f, 20000f)
+}
+
+private fun stepBandQ(currentQ: Float, sign: Int): Float {
+    val step = when {
+        currentQ < 3.0f -> 0.1f
+        currentQ < 8.0f -> 0.2f
+        else -> 0.5f
+    }
+    val raw = (currentQ + step * sign).coerceIn(0.1f, 20.0f)
+    return (raw * 10f).roundToInt() / 10f
+}
+
+private fun formatBandInspectorFreq(freqHz: Float): String {
+    return if (freqHz >= 1000f) {
+        val khz = freqHz / 1000f
+        if (abs(khz - khz.roundToInt()) < 0.05f) {
+            "${khz.roundToInt()} kHz"
+        } else {
+            String.format(Locale.US, "%.1f kHz", khz)
         }
-        val invA0 = 1.0 / rawA0
-        val nb0 = rawB0 * invA0
-        val nb1 = rawB1 * invA0
-        val nb2 = rawB2 * invA0
-        val na1 = rawA1 * invA0
-        val na2 = rawA2 * invA0
+    } else {
+        "${freqHz.roundToInt()} Hz"
+    }
+}
 
-        if (!nb0.isFinite() || !nb1.isFinite() || !nb2.isFinite() || !na1.isFinite() || !na2.isFinite()) {
-            writeIdentityStaging(stage)
-            return
+private fun formatBandShortFreq(freqHz: Float): String {
+    return if (freqHz >= 1000f) {
+        val khz = freqHz / 1000f
+        if (abs(khz - khz.roundToInt()) < 0.05f) {
+            "${khz.roundToInt()}k"
+        } else {
+            String.format(Locale.US, "%.1fk", khz)
         }
-
-        stagingB0[stage] = nb0
-        stagingB1[stage] = nb1
-        stagingB2[stage] = nb2
-        stagingA1[stage] = na1
-        stagingA2[stage] = na2
+    } else {
+        "${freqHz.roundToInt()}"
     }
+}
 
-    private fun writeIdentityStaging(stage: Int) {
-        stagingB0[stage] = 1.0
-        stagingB1[stage] = 0.0
-        stagingB2[stage] = 0.0
-        stagingA1[stage] = 0.0
-        stagingA2[stage] = 0.0
-    }
+private fun formatSvaraPercent(percent: Float): String = "${percent.roundToInt()}%"
 
-    private fun clearFilterStates() {
-        var i = 0
-        while (i < STAGE_COUNT) {
-            s1L[i] = 0.0
-            s2L[i] = 0.0
-            s1R[i] = 0.0
-            s2R[i] = 0.0
-            i++
-        }
-        niEnvelope = 0.0
-        niGainSmooth = 1.0
-        peakEnvelope = 0.0
+private fun formatLrBalanceReadout(balance: Float): String {
+    val rounded = balance.roundToInt()
+    return when {
+        rounded < -1 -> "L ${abs(rounded)}"
+        rounded > 1 -> "R $rounded"
+        else -> "Center"
     }
+}
+
+private fun eqSignBucket(value: Float, epsilon: Float): Int = when {
+    value > epsilon -> 1
+    value < -epsilon -> -1
+    else -> 0
+}
+
+private fun inferAudioGenre(svara: SvaraParams): AudioGenre {
+    if (svara.nightDialogue >= 35f) return AudioGenre.LATE_NIGHT
+
+    val bassAvg = ((svara.bands.getOrNull(0)?.gainDb ?: 0f) + (svara.bands.getOrNull(1)?.gainDb ?: 0f)) * 0.5f
+    if (svara.su >= 3.5f || bassAvg >= 3.5f) return AudioGenre.BASS
+
+    val vocalAvg = ((svara.bands.getOrNull(5)?.gainDb ?: 0f) + (svara.bands.getOrNull(6)?.gainDb ?: 0f)) * 0.5f
+    if (svara.vo >= 3.0f || vocalAvg >= 2.5f) return AudioGenre.VOCAL
+
+    return AudioGenre.FLAT
 }
