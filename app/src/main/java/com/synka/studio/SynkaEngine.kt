@@ -241,7 +241,7 @@ class SynkaEngine(context: Context) {
             activePresetId = null
         }
         applyVisualShader()
-        SynkaColorService.updateFromEngine(appContext, normalized, _isMasterEnabled.value)
+        SynkaOverlayService.updateFromEngine(appContext, normalized, _isMasterEnabled.value)
     }
 
     fun updateSvara(params: SvaraParams, clearPresetSelection: Boolean = true) {
@@ -748,7 +748,7 @@ class SynkaEngine(context: Context) {
     }
 
     private fun pushSystemBridgeUpdates() {
-        SynkaColorService.updateFromEngine(
+        SynkaOverlayService.updateFromEngine(
             appContext,
             _activeArka.value,
             _isMasterEnabled.value
