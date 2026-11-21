@@ -6,7 +6,6 @@ import android.content.Context
 import android.content.Intent
 import android.media.AudioManager
 import android.os.Build
-import android.provider.Settings
 import android.widget.Toast
 import androidx.annotation.OptIn
 import androidx.compose.foundation.background
@@ -75,8 +74,10 @@ fun SettingsDrawerSheet(
     var showClearStorageDialog by remember { mutableStateOf(false) }
 
     LaunchedEffect(Unit) {
-        SynkaColorService.refreshPermissions(context)
+        SynkaOverlayService.refreshPermissionState(context)
     }
+
+    val installReport = remember { OverlayPermissionHelper.inspectInstallSource(context) }
 
     val deviceSampleRateLabel = remember(
         engine.isAudioPlaying,
@@ -151,23 +152,32 @@ fun SettingsDrawerSheet(
 
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 DrawerActionRow(
-                    title = "Screen Filter (Accessibility)",
-                    subtitle = SynkaColorService.statusSummary,
-                    accentHighlight = SynkaColorService.isServiceBound && SynkaColorService.isSystemColorEnabled,
+                    title = "Screen Filter (Display Overlay)",
+                    subtitle = SynkaOverlayService.statusSummary,
+                    accentHighlight = SynkaOverlayService.isRunning && !SynkaOverlayService.isPausedByUser,
                     onClick = {
-                        if (!SynkaColorService.isServiceBound) {
-                            runCatching {
-                                context.startActivity(
-                                    Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)
-                                        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                                )
-                            }
+                        if (!SynkaOverlayService.hasOverlayPermission) {
+                            OverlayPermissionHelper.openOverlayPermissionSettings(context)
+                        } else if (SynkaOverlayService.isRunning) {
+                            SynkaOverlayService.stop(context)
                         } else {
-                            SynkaColorService.updateFromEngine(context, engine.activeArka, engine.isMasterEnabled)
-                            SynkaColorService.setEnabled(context, !SynkaColorService.isSystemColorEnabled)
+                            SynkaOverlayService.updateFromEngine(
+                                context,
+                                engine.activeArka,
+                                engine.isMasterEnabled
+                            )
+                            SynkaOverlayService.start(context)
                         }
                     }
                 )
+
+                if (OverlayPermissionHelper.isOnePlusOrOplusDevice()) {
+                    DrawerActionRow(
+                        title = "OxygenOS Battery Persistence",
+                        subtitle = "Set 'Allow background activity' so OxygenOS keeps filters alive",
+                        onClick = { OverlayPermissionHelper.openBatterySettings(context) }
+                    )
+                }
 
                 DrawerActionRow(
                     title = "System Audio EQ (DynamicsProcessing)",
@@ -188,7 +198,7 @@ fun SettingsDrawerSheet(
                     }
                 )
 
-                val hasSecure = SynkaColorService.hasSecureSettingsGrant
+                val hasSecure = SynkaOverlayService.hasSecureSettingsGrant
                 DrawerActionRow(
                     title = if (hasSecure) "Hardware B&W Ready (Granted)" else "Optional: Copy ADB Command for System B&W",
                     subtitle = if (hasSecure) {
@@ -283,11 +293,16 @@ fun SettingsDrawerSheet(
             ) {
                 DiagnosticRow("Android API", "API ${Build.VERSION.SDK_INT} (Android ${Build.VERSION.RELEASE})")
                 DiagnosticRow("Device", "${Build.MANUFACTURER} ${Build.MODEL}")
+                DiagnosticRow("Install Source", "${installReport.channel.name} / ${installReport.packageSourceLabel}")
+                DiagnosticRow(
+                    "Touch Opacity Cap",
+                    "${(SynkaOverlayService.activeMaxTouchOpacity * 100f).toInt()}% (applied ${(SynkaOverlayService.activeAppliedAlpha * 100f).toInt()}%)"
+                )
                 DiagnosticRow("AGSL Shader", agslStatusLabel)
                 DiagnosticRow("Local Svara DSP", "${engine.svaraAudio.activeEncodingLabel()} @ ${engine.svaraAudio.activeSampleRate} Hz")
                 DiagnosticRow("Media3 Version", MediaLibraryInfo.VERSION)
                 DiagnosticRow("Device Sample Rate", deviceSampleRateLabel)
-                DiagnosticRow("System Screen", SynkaColorService.statusSummary)
+                DiagnosticRow("System Screen", SynkaOverlayService.statusSummary)
                 DiagnosticRow("System Audio", SvaraGlobalService.statusSummary)
             }
 
