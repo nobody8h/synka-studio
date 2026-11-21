@@ -22,6 +22,7 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.annotation.OptIn
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.horizontalScroll
@@ -54,12 +55,16 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.CornerRadius
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
@@ -194,13 +199,22 @@ class MainActivity : ComponentActivity() {
 private fun SynkaSpikeScreen() {
     val context = LocalContext.current
 
-    val quickPresets = remember {
+    val quickArkaPresets = remember {
         listOf(
             QuickPresetChip("Kora", SynkaBuiltInPresets.KORA),
             QuickPresetChip("Cinema Grade", SynkaBuiltInPresets.CINEMA_TEAL_GOLD),
             QuickPresetChip("Red Iso", SynkaBuiltInPresets.RED_ISO_CRIMSON_LOCK),
             QuickPresetChip("B&W", SynkaBuiltInPresets.BW_SILVER_GELATIN),
             QuickPresetChip("Warm", SynkaBuiltInPresets.WARM_GOLDEN_HOUR)
+        )
+    }
+
+    val quickAudioPresets = remember {
+        listOf(
+            QuickPresetChip("Flat", SynkaBuiltInPresets.AUDIO_STUDIO_FLAT),
+            QuickPresetChip("Bass", SynkaBuiltInPresets.AUDIO_SUB_BASS_PUNCH),
+            QuickPresetChip("Vocal", SynkaBuiltInPresets.AUDIO_VOCAL_CLARITY),
+            QuickPresetChip("Late Night", SynkaBuiltInPresets.AUDIO_LATE_NIGHT_SOFT)
         )
     }
 
@@ -229,16 +243,37 @@ private fun SynkaSpikeScreen() {
     var durationMs by remember { mutableLongStateOf(0L) }
     var isScrubbing by remember { mutableStateOf(false) }
 
-    var selectedPreset by remember { mutableStateOf(quickPresets.first().preset) }
-    var subzeroDimmer by remember { mutableFloatStateOf(selectedPreset.arka.subzeroDimmer) }
-    var bassDb by remember { mutableFloatStateOf(0.0f) }
-    var bypass by remember { mutableStateOf(false) }
+    // Arka visual state
+    var selectedArkaPreset by remember { mutableStateOf(quickArkaPresets.first().preset) }
+    var subzeroDimmer by remember { mutableFloatStateOf(selectedArkaPreset.arka.subzeroDimmer) }
+    var bypassShader by remember { mutableStateOf(false) }
+
+    // Svara DSP verification state
+    var selectedAudioPreset by remember { mutableStateOf(quickAudioPresets.first().preset) }
+    var stressTest12Db by remember { mutableStateOf(false) }
+    var bypassAudio by remember { mutableStateOf(false) }
+
+    // Pre-allocated 48-bar buffer read lock-free for Canvas draw pass
+    val waveformBars = remember { FloatArray(SvaraAudio.WAVEFORM_BARS) }
+    var waveformFrameTick by remember { mutableIntStateOf(0) }
 
     var textureViewRef by remember { mutableStateOf<TextureView?>(null) }
     var imageViewRef by remember { mutableStateOf<ImageView?>(null) }
 
-    val activeArkaParams = remember(selectedPreset, subzeroDimmer) {
-        selectedPreset.arka.copy(subzeroDimmer = subzeroDimmer).normalized()
+    val activeArkaParams = remember(selectedArkaPreset, subzeroDimmer) {
+        selectedArkaPreset.arka.copy(subzeroDimmer = subzeroDimmer).normalized()
+    }
+
+    val activeSvaraParams = remember(selectedAudioPreset, stressTest12Db) {
+        val base = selectedAudioPreset.svara
+        if (stressTest12Db) {
+            base.copy(
+                preAmpDb = 12f,
+                antiCrackle = maxOf(base.antiCrackle, 90f)
+            ).normalized()
+        } else {
+            base.normalized()
+        }
     }
 
     fun persistUri(uri: Uri) {
@@ -345,8 +380,39 @@ private fun SynkaSpikeScreen() {
         }
     }
 
+    // Push Svara DSP parameters lock-free whenever preset, stress test, or bypass changes
+    LaunchedEffect(activeSvaraParams, bypassAudio) {
+        svaraAudio.updateParams(activeSvaraParams, bypassAudio)
+    }
+
+    // 30 fps lock-free 48-bar waveform sampler (decays smoothly when paused)
+    LaunchedEffect(svaraAudio, isPlaying) {
+        while (true) {
+            if (isPlaying) {
+                svaraAudio.readWaveform(waveformBars)
+                waveformFrameTick++
+                delay(33L)
+            } else {
+                var anyActive = false
+                var i = 0
+                while (i < waveformBars.size) {
+                    val v = waveformBars[i] * 0.75f
+                    waveformBars[i] = if (v < 0.005f) 0f else v
+                    if (waveformBars[i] > 0f) anyActive = true
+                    i++
+                }
+                if (anyActive) {
+                    waveformFrameTick++
+                    delay(33L)
+                } else {
+                    delay(120L)
+                }
+            }
+        }
+    }
+
     // Re-create RenderEffect and attach to active View on every parameter, mode, or view update
-    LaunchedEffect(activeArkaParams, bypass, mediaMode, photoUri, textureViewRef, imageViewRef) {
+    LaunchedEffect(activeArkaParams, bypassShader, mediaMode, photoUri, textureViewRef, imageViewRef) {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             val activeView = when (mediaMode) {
                 MediaMode.VIDEO -> textureViewRef
@@ -365,15 +431,11 @@ private fun SynkaSpikeScreen() {
                     ArkaShader.applyToView(
                         targetView = activeView,
                         params = activeArkaParams,
-                        bypass = bypass
+                        bypass = bypassShader
                     )
                 }
             }
         }
-    }
-
-    LaunchedEffect(bassDb) {
-        svaraAudio.bassGainDb = bassDb
     }
 
     Column(
@@ -391,13 +453,13 @@ private fun SynkaSpikeScreen() {
         ) {
             Column {
                 Text(
-                    text = "Synka Studio • Arka GPU",
+                    text = "Synka Studio • Svara DSP",
                     fontSize = 20.sp,
                     fontWeight = FontWeight.Bold,
                     color = Color.White
                 )
                 Text(
-                    text = "API ${Build.VERSION.SDK_INT} (${Build.MODEL}) • Chunk 4 Gate",
+                    text = "API ${Build.VERSION.SDK_INT} (${Build.MODEL}) • Chunk 5 Gate",
                     fontSize = 12.sp,
                     fontFamily = FontFamily.Monospace,
                     color = Color(0xFF9E9E9E)
@@ -406,7 +468,7 @@ private fun SynkaSpikeScreen() {
 
             Button(
                 onClick = {
-                    throw RuntimeException("Synka Test Gate 4: Simulated uncaught exception on API ${Build.VERSION.SDK_INT}")
+                    throw RuntimeException("Synka Test Gate 5: Simulated uncaught exception on API ${Build.VERSION.SDK_INT}")
                 },
                 colors = ButtonDefaults.buttonColors(
                     containerColor = Color(0xFFCF6679),
@@ -422,7 +484,7 @@ private fun SynkaSpikeScreen() {
         Box(
             modifier = Modifier
                 .fillMaxWidth()
-                .height(220.dp)
+                .height(200.dp)
                 .background(Color(0xFF0A0A0A), RoundedCornerShape(10.dp))
                 .border(1.dp, Color(0xFF2C2C2C), RoundedCornerShape(10.dp))
         ) {
@@ -573,6 +635,157 @@ private fun SynkaSpikeScreen() {
             )
         }
 
+        // Svara DSP Verification Strip (Preset Chips + +12 dB Stress Test + Live 48-Bar Canvas)
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .background(Color(0xFF181818), RoundedCornerShape(10.dp))
+                .border(1.dp, Color(0xFF2C2C2C), RoundedCornerShape(10.dp))
+                .padding(12.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            val dspStatus = String.format(
+                Locale.US,
+                "Svara DSP: %s • Pre %+.1fdB • Ar %.0f • Ni %.0f",
+                selectedAudioPreset.name,
+                activeSvaraParams.preAmpDb,
+                activeSvaraParams.antiCrackle,
+                activeSvaraParams.nightDialogue
+            )
+            Text(
+                text = dspStatus,
+                fontSize = 12.sp,
+                fontFamily = FontFamily.Monospace,
+                color = Color(0xFFD49A45)
+            )
+
+            Text(
+                text = "${svaraAudio.activeSampleRate} Hz • ${svaraAudio.activeEncodingLabel()} • ${svaraAudio.activeChannelCount}ch • 12-Stage TDF-II",
+                fontSize = 11.sp,
+                fontFamily = FontFamily.Monospace,
+                color = Color(0xFF9E9E9E)
+            )
+
+            // Live 48-bar Canvas waveform strip
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(68.dp)
+                    .background(Color(0xFF0A0A0A), RoundedCornerShape(8.dp))
+                    .border(1.dp, Color(0xFF292929), RoundedCornerShape(8.dp))
+                    .padding(horizontal = 8.dp, vertical = 6.dp)
+            ) {
+                Canvas(modifier = Modifier.fillMaxSize()) {
+                    // Read frame tick inside draw scope so only Draw phase invalidates
+                    @Suppress("UNUSED_VARIABLE")
+                    val tick = waveformFrameTick
+
+                    val barCount = SvaraAudio.WAVEFORM_BARS
+                    val slotW = size.width / barCount
+                    val barW = (slotW * 0.68f).coerceAtLeast(2f)
+                    val gapX = (slotW - barW) * 0.5f
+                    val midY = size.height * 0.5f
+                    val corner = CornerRadius(barW * 0.5f, barW * 0.5f)
+
+                    // Subtle center baseline
+                    drawLine(
+                        color = Color(0xFF222222),
+                        start = Offset(0f, midY),
+                        end = Offset(size.width, midY),
+                        strokeWidth = 1f
+                    )
+
+                    var i = 0
+                    while (i < barCount) {
+                        val mag = waveformBars[i].coerceIn(0f, 1f)
+                        val barH = (mag * size.height).coerceAtLeast(3f)
+                        val left = i * slotW + gapX
+                        val top = midY - barH * 0.5f
+                        val barColor = when {
+                            bypassAudio -> Color(0xFF6B6B6B)
+                            mag > 0.88f -> Color(0xFFCF6679)
+                            stressTest12Db -> Color(0xFFE6B45E)
+                            else -> Color(0xFFD49A45)
+                        }
+                        drawRoundRect(
+                            color = barColor,
+                            topLeft = Offset(left, top),
+                            size = Size(barW, barH),
+                            cornerRadius = corner
+                        )
+                        i++
+                    }
+                }
+            }
+
+            // Audio preset test chips: Flat, Bass, Vocal, Late Night
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                quickAudioPresets.forEach { item ->
+                    val isSelected = selectedAudioPreset.id == item.preset.id
+                    FilterChip(
+                        selected = isSelected,
+                        onClick = { selectedAudioPreset = item.preset },
+                        label = {
+                            Text(
+                                text = item.chipLabel,
+                                fontSize = 12.sp,
+                                fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal
+                            )
+                        },
+                        colors = FilterChipDefaults.filterChipColors(
+                            selectedContainerColor = Color(0xFFD49A45),
+                            selectedLabelColor = Color(0xFF121212),
+                            containerColor = Color(0xFF1E1E1E),
+                            labelColor = Color(0xFFE3E3E3)
+                        )
+                    )
+                }
+            }
+
+            // +12 dB Stress Test button + Audio Bypass toggle
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Button(
+                    onClick = { stressTest12Db = !stressTest12Db },
+                    modifier = Modifier.weight(1f),
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = if (stressTest12Db) Color(0xFFCF6679) else Color(0xFF2A2A2A),
+                        contentColor = if (stressTest12Db) Color.Black else Color(0xFFE3E3E3)
+                    ),
+                    shape = RoundedCornerShape(8.dp)
+                ) {
+                    Text(
+                        text = if (stressTest12Db) "+12 dB Stress: ON" else "+12 dB Stress Test",
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                }
+
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    Text(
+                        text = "Bypass DSP",
+                        fontSize = 12.sp,
+                        color = Color(0xFFBDBDBD)
+                    )
+                    Switch(
+                        checked = bypassAudio,
+                        onCheckedChange = { bypassAudio = it }
+                    )
+                }
+            }
+        }
+
         // Quick-tap Arka Preset Test Bar
         Column(
             modifier = Modifier.fillMaxWidth(),
@@ -584,7 +797,7 @@ private fun SynkaSpikeScreen() {
             val soloSuffix = if (soloLabels.isNotEmpty()) " • SOLO: $soloLabels" else ""
 
             Text(
-                text = "Arka Grade: ${selectedPreset.name}$soloSuffix",
+                text = "Arka Grade: ${selectedArkaPreset.name}$soloSuffix",
                 fontSize = 13.sp,
                 fontFamily = FontFamily.Monospace,
                 color = Color(0xFFE3E3E3)
@@ -596,12 +809,12 @@ private fun SynkaSpikeScreen() {
                     .horizontalScroll(rememberScrollState()),
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                quickPresets.forEach { item ->
-                    val isSelected = selectedPreset.id == item.preset.id
+                quickArkaPresets.forEach { item ->
+                    val isSelected = selectedArkaPreset.id == item.preset.id
                     FilterChip(
                         selected = isSelected,
                         onClick = {
-                            selectedPreset = item.preset
+                            selectedArkaPreset = item.preset
                             subzeroDimmer = item.preset.arka.subzeroDimmer
                         },
                         label = {
@@ -637,25 +850,7 @@ private fun SynkaSpikeScreen() {
             )
         }
 
-        // Bass Low-Shelf Slider (-12.0 .. +12.0 dB at 100 Hz)
-        Column(modifier = Modifier.fillMaxWidth()) {
-            Text(
-                text = String.format(Locale.US, "Bass (100 Hz Shelf): %+.1f dB", bassDb),
-                fontSize = 13.sp,
-                fontFamily = FontFamily.Monospace,
-                color = Color(0xFFE3E3E3)
-            )
-            Slider(
-                value = bassDb,
-                onValueChange = {
-                    bassDb = it
-                    svaraAudio.bassGainDb = it
-                },
-                valueRange = -12f..12f
-            )
-        }
-
-        // Bypass Toggle
+        // Bypass Shader Toggle
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -671,8 +866,8 @@ private fun SynkaSpikeScreen() {
                 color = Color(0xFFE3E3E3)
             )
             Switch(
-                checked = bypass,
-                onCheckedChange = { bypass = it }
+                checked = bypassShader,
+                onCheckedChange = { bypassShader = it }
             )
         }
     }
