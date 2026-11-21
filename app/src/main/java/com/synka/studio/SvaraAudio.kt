@@ -18,15 +18,6 @@ import kotlin.math.sin
 import kotlin.math.sqrt
 import kotlin.math.tanh
 
-/**
- * 12-stage Transposed Direct Form II (TDF-II) parametric audio processor for Media3 ExoPlayer.
- * Stages:
- *   - Stage 0: Low-shelf (Sub-Rumble + Bass Depth/Punch globe)
- *   - Stages 1..10: 10-band parametric peaking EQ (+ Mid-Bass / Vocal / Treble contour blend)
- *   - Stage 11: High-shelf (Air contour + Soundstage Air globe)
- * Followed by M/S stereo width, Night Dialogue dynamic leveling, L/R balance,
- * Anti-Crackle soft-knee limiter, and lock-free waveform telemetry.
- */
 @OptIn(UnstableApi::class)
 class SvaraAudio : BaseAudioProcessor() {
 
@@ -62,8 +53,9 @@ class SvaraAudio : BaseAudioProcessor() {
         private set
 
     @Volatile
-    var activeEncodingLabel: String = "Idle"
-        private set
+    private var encodingLabel: String = "Idle"
+
+    fun activeEncodingLabel(): String = encodingLabel
 
     @Volatile
     private var latestParams: SvaraParams = SvaraParams()
@@ -78,17 +70,10 @@ class SvaraAudio : BaseAudioProcessor() {
         sampleRate = 48_000
     )
 
-    // TDF-II delay states: [channel * STAGE_COUNT + stage]
     private val z1 = DoubleArray(MAX_CHANNELS * STAGE_COUNT)
     private val z2 = DoubleArray(MAX_CHANNELS * STAGE_COUNT)
-
-    // Smooth envelope tracker for Night Dialogue compression
     private var dialogueEnvelope: Float = 0.05f
-
-    // Lock-free waveform bar magnitudes (0f..1f stored as Float bits)
     private val waveformBits = AtomicIntegerArray(WAVEFORM_BARS)
-
-    // Scratch accumulation buffer owned exclusively by the audio rendering thread
     private val frameBarPeaks = FloatArray(WAVEFORM_BARS)
 
     fun updateParams(params: SvaraParams, bypassed: Boolean = false) {
@@ -129,7 +114,7 @@ class SvaraAudio : BaseAudioProcessor() {
 
         val sr = inputAudioFormat.sampleRate.coerceAtLeast(8_000)
         activeSampleRate = sr
-        activeEncodingLabel = when (encoding) {
+        encodingLabel = when (encoding) {
             C.ENCODING_PCM_FLOAT -> "PCM 32-bit Float"
             C.ENCODING_PCM_16BIT -> "PCM 16-bit"
             else -> "PCM"
@@ -174,7 +159,6 @@ class SvaraAudio : BaseAudioProcessor() {
         val leftGain = activeSnap.leftGain
         val rightGain = activeSnap.rightGain
 
-        // Night Dialogue envelope time constants (sample-rate aware)
         val srF = activeSnap.sampleRate.toFloat().coerceAtLeast(8_000f)
         val attackCoeff = 1f - kotlin.math.exp(-1f / (0.012f * srF))
         val releaseCoeff = 1f - kotlin.math.exp(-1f / (0.180f * srF))
@@ -182,7 +166,6 @@ class SvaraAudio : BaseAudioProcessor() {
         val frameSamples = FloatArray(channels)
 
         for (frame in 0 until frameCount) {
-            // 1. Read frame samples normalized to -1f..1f
             for (ch in 0 until channels) {
                 frameSamples[ch] = if (isFloat) {
                     inputBuffer.float
@@ -192,7 +175,6 @@ class SvaraAudio : BaseAudioProcessor() {
             }
 
             if (!bypassed) {
-                // 2. Pre-amp + 12-stage TDF-II Biquad cascade per channel
                 for (ch in 0 until channels) {
                     var x = (frameSamples[ch] * preAmpGain).toDouble()
                     val chOffset = ch * STAGE_COUNT
@@ -215,7 +197,6 @@ class SvaraAudio : BaseAudioProcessor() {
                     frameSamples[ch] = x.toFloat()
                 }
 
-                // 3. Stereo Mid/Side Soundstage Width (only on 2-channel stereo)
                 if (channels == 2 && abs(widthGain - 1f) > 0.001f) {
                     val mid = 0.5f * (frameSamples[0] + frameSamples[1])
                     val side = 0.5f * (frameSamples[0] - frameSamples[1]) * widthGain
@@ -223,7 +204,6 @@ class SvaraAudio : BaseAudioProcessor() {
                     frameSamples[1] = mid - side
                 }
 
-                // 4. Night Dialogue dynamic range leveling
                 if (nightNorm > 0.005f) {
                     var peakAbs = 0f
                     for (ch in 0 until channels) {
@@ -242,19 +222,16 @@ class SvaraAudio : BaseAudioProcessor() {
                     }
                 }
 
-                // 5. L/R Balance (stereo)
                 if (channels == 2) {
                     frameSamples[0] *= leftGain
                     frameSamples[1] *= rightGain
                 }
 
-                // 6. Anti-Crackle Soft-Knee Limiter
                 for (ch in 0 until channels) {
                     frameSamples[ch] = applySoftLimiter(frameSamples[ch], limiterNorm)
                 }
             }
 
-            // 7. Accumulate waveform bar energy and write output frame
             var monoAbs = 0f
             for (ch in 0 until channels) {
                 val sample = frameSamples[ch].coerceIn(-1f, 1f)
@@ -276,7 +253,6 @@ class SvaraAudio : BaseAudioProcessor() {
             }
         }
 
-        // Smoothly publish waveform telemetry for UI polling
         for (i in 0 until WAVEFORM_BARS) {
             val prev = Float.fromBits(waveformBits.get(i))
             val target = sqrt(frameBarPeaks[i].coerceIn(0f, 1f))
@@ -299,7 +275,7 @@ class SvaraAudio : BaseAudioProcessor() {
     override fun onReset() {
         resetFilterStates()
         clearWaveform()
-        activeEncodingLabel = "Idle"
+        encodingLabel = "Idle"
     }
 
     private fun resetFilterStates() {
@@ -332,12 +308,10 @@ class SvaraAudio : BaseAudioProcessor() {
 
         val coeffs = Array(STAGE_COUNT) { BiquadCoeffs() }
 
-        // Stage 0: Low-shelf combining SU (Sub-Rumble) + Bass Punch & Depth globe
         val lowShelfFreq = (75.0 + params.bassDepthX * 35.0).coerceIn(35.0, min(140.0, nyquistSafeMax))
         val lowShelfGainDb = (params.su + params.bassDepthY * 5.0f).toDouble().coerceIn(-18.0, 18.0)
         coeffs[0] = designLowShelf(lowShelfFreq, lowShelfGainDb, sr)
 
-        // Stages 1..10: 10-band parametric EQ + 5-zone contour & night dialogue blend
         val nightSpeechBoostDb = (params.nightDialogue / 100f) * 4.0f
         val defaultFreqs = SvaraParams.DEFAULT_FREQUENCIES_HZ
         for (i in 0 until 10) {
@@ -357,7 +331,6 @@ class SvaraAudio : BaseAudioProcessor() {
             coeffs[i + 1] = designPeakingEq(freq, q, totalGainDb, sr)
         }
 
-        // Stage 11: High-shelf combining AI (Air) + Soundstage Air globe Y
         val highShelfFreq = min(10_500.0, nyquistSafeMax)
         val highShelfGainDb = (params.ai + params.airWidthY * 5.0f).toDouble().coerceIn(-18.0, 18.0)
         coeffs[11] = designHighShelf(highShelfFreq, highShelfGainDb, sr)
@@ -416,7 +389,7 @@ class SvaraAudio : BaseAudioProcessor() {
         val w0 = 2.0 * PI * freqHz / sampleRate
         val cosW0 = cos(w0)
         val sinW0 = sin(w0)
-        val alpha = sinW0 / 2.0 * sqrt(2.0) // S = 1.0 Butterworth slope
+        val alpha = sinW0 / 2.0 * sqrt(2.0)
         val twoSqrtAAlpha = 2.0 * sqrt(a) * alpha
 
         val b0 = a * ((a + 1.0) - (a - 1.0) * cosW0 + twoSqrtAAlpha)
@@ -439,7 +412,7 @@ class SvaraAudio : BaseAudioProcessor() {
         val w0 = 2.0 * PI * freqHz / sampleRate
         val cosW0 = cos(w0)
         val sinW0 = sin(w0)
-        val alpha = sinW0 / 2.0 * sqrt(2.0) // S = 1.0 Butterworth slope
+        val alpha = sinW0 / 2.0 * sqrt(2.0)
         val twoSqrtAAlpha = 2.0 * sqrt(a) * alpha
 
         val b0 = a * ((a + 1.0) + (a - 1.0) * cosW0 + twoSqrtAAlpha)
