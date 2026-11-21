@@ -9,6 +9,7 @@ import android.graphics.Color as AndroidColor
 import android.graphics.LinearGradient
 import android.graphics.Paint
 import android.graphics.Shader
+import android.graphics.SurfaceTexture
 import android.os.Build
 import android.view.Gravity
 import android.view.TextureView
@@ -217,7 +218,6 @@ private fun DiscoverCatalogModal(
                 .padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
-            // Header
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
@@ -279,7 +279,6 @@ private fun DiscoverCatalogModal(
                 }
             }
 
-            // Search Input
             OutlinedTextField(
                 value = searchQuery,
                 onValueChange = { searchQuery = it },
@@ -318,7 +317,6 @@ private fun DiscoverCatalogModal(
                 shape = RoundedCornerShape(12.dp)
             )
 
-            // Domain Filter Pills
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
@@ -355,7 +353,6 @@ private fun DiscoverCatalogModal(
                 }
             }
 
-            // Results List
             if (filteredEntries.isEmpty()) {
                 Column(
                     modifier = Modifier
@@ -852,6 +849,7 @@ private fun LivePreviewCard(
     val colors = LocalSynkaColors.current
     val cardShape = RoundedCornerShape(18.dp)
 
+    var containerViewRef by remember { mutableStateOf<FrameLayout?>(null) }
     var textureViewRef by remember { mutableStateOf<TextureView?>(null) }
     var imageViewRef by remember { mutableStateOf<ImageView?>(null) }
     var isHoldingBeforeAfter by remember { mutableStateOf(false) }
@@ -865,17 +863,21 @@ private fun LivePreviewCard(
         }
     }
 
-    LaunchedEffect(engine, textureViewRef, imageViewRef, isPreviewActive) {
+    LaunchedEffect(engine, containerViewRef, textureViewRef, imageViewRef, isPreviewActive) {
+        val container = containerViewRef
         val tv = textureViewRef
         val iv = imageViewRef
-        if (isPreviewActive && tv != null && iv != null) {
-            engine.bindVisualTarget(tv, iv)
+        if (isPreviewActive && container != null && tv != null && iv != null) {
+            engine.bindVisualTarget(tv, iv, container)
         }
     }
 
-    DisposableEffect(engine) {
+    DisposableEffect(engine, containerViewRef, textureViewRef, imageViewRef) {
+        val container = containerViewRef
+        val tv = textureViewRef
+        val iv = imageViewRef
         onDispose {
-            engine.bindVisualTarget(null, null)
+            engine.unbindVisualTarget(tv, iv, container)
         }
     }
 
@@ -903,30 +905,21 @@ private fun LivePreviewCard(
         engine.activeArka,
         engine.visualUri,
         engine.visualIsVideo,
+        containerViewRef,
         textureViewRef,
         imageViewRef
     ) {
         if (!isPreviewActive) return@LaunchedEffect
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             val bypass = isHoldingBeforeAfter || !engine.isMasterEnabled
-            val activeView: View? = if (engine.visualUri != null && engine.visualIsVideo) {
-                textureViewRef
-            } else {
-                imageViewRef
-            }
-            val inactiveView: View? = if (engine.visualUri != null && engine.visualIsVideo) {
-                imageViewRef
-            } else {
-                textureViewRef
-            }
-            inactiveView?.let { engine.arkaShader.clearFromView(it) }
-            activeView?.let {
-                engine.arkaShader.applyToView(
-                    targetView = it,
-                    params = engine.activeArka,
-                    bypass = bypass
-                )
-            }
+            val container = containerViewRef ?: return@LaunchedEffect
+            textureViewRef?.let { engine.arkaShader.clearFromView(it) }
+            imageViewRef?.let { engine.arkaShader.clearFromView(it) }
+            engine.arkaShader.applyToView(
+                targetView = container,
+                params = engine.activeArka,
+                bypass = bypass
+            )
         }
     }
 
@@ -975,6 +968,7 @@ private fun LivePreviewCard(
                             ViewGroup.LayoutParams.MATCH_PARENT,
                             ViewGroup.LayoutParams.MATCH_PARENT
                         )
+                        val parentFrame = this
 
                         val tv = TextureView(ctx).apply {
                             layoutParams = FrameLayout.LayoutParams(
@@ -983,6 +977,29 @@ private fun LivePreviewCard(
                                 Gravity.CENTER
                             )
                             visibility = View.GONE
+                            surfaceTextureListener = object : TextureView.SurfaceTextureListener {
+                                override fun onSurfaceTextureAvailable(
+                                    surface: SurfaceTexture,
+                                    width: Int,
+                                    height: Int
+                                ) {
+                                    parentFrame.invalidate()
+                                }
+
+                                override fun onSurfaceTextureSizeChanged(
+                                    surface: SurfaceTexture,
+                                    width: Int,
+                                    height: Int
+                                ) {
+                                    parentFrame.invalidate()
+                                }
+
+                                override fun onSurfaceTextureDestroyed(surface: SurfaceTexture): Boolean = true
+
+                                override fun onSurfaceTextureUpdated(surface: SurfaceTexture) {
+                                    parentFrame.invalidate()
+                                }
+                            }
                         }
 
                         val iv = ImageView(ctx).apply {
@@ -993,26 +1010,28 @@ private fun LivePreviewCard(
                             )
                             scaleType = ImageView.ScaleType.FIT_CENTER
                             visibility = View.VISIBLE
+                            if (!testPatternBitmap.isRecycled) {
+                                setImageBitmap(testPatternBitmap)
+                            }
                         }
 
                         addView(tv)
                         addView(iv)
+                        containerViewRef = parentFrame
                         textureViewRef = tv
                         imageViewRef = iv
                     }
                 },
                 onRelease = { container ->
-                    textureViewRef?.let { tv ->
-                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                            engine.arkaShader.clearFromView(tv)
-                        }
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                        engine.arkaShader.clearFromView(container)
+                        textureViewRef?.let { engine.arkaShader.clearFromView(it) }
+                        imageViewRef?.let { engine.arkaShader.clearFromView(it) }
                     }
-                    imageViewRef?.let { iv ->
-                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                            engine.arkaShader.clearFromView(iv)
-                        }
-                    }
+                    textureViewRef?.surfaceTextureListener = null
+                    engine.unbindVisualTarget(textureViewRef, imageViewRef, container)
                     container.removeAllViews()
+                    containerViewRef = null
                     textureViewRef = null
                     imageViewRef = null
                 }
@@ -1451,7 +1470,6 @@ internal fun createCalibrationTestPatternBitmap(width: Int, height: Int): Bitmap
     val padX = width * 0.06f
     val usableW = width - padX * 2f
 
-    // 1. Continuous 8-band HSL Hue Spectrum Gradient
     val spectrumTop = height * 0.14f
     val spectrumBottom = height * 0.44f
     val hueColors = intArrayOf(
@@ -1477,7 +1495,6 @@ internal fun createCalibrationTestPatternBitmap(width: Int, height: Int): Bitmap
     canvas.drawRoundRect(padX, spectrumTop, padX + usableW, spectrumBottom, 16f, 16f, paint)
     paint.shader = null
 
-    // 2. Five Reference Swatches
     val swatchTop = height * 0.50f
     val swatchBottom = height * 0.67f
     val swatches = intArrayOf(
@@ -1495,7 +1512,6 @@ internal fun createCalibrationTestPatternBitmap(width: Int, height: Int): Bitmap
         canvas.drawRoundRect(left, swatchTop, left + swatchW, swatchBottom, 12f, 12f, paint)
     }
 
-    // 3. 11-Step Neutral Grayscale Luminance Ramp
     val rampTop = height * 0.73f
     val rampBottom = height * 0.86f
     val steps = 11
