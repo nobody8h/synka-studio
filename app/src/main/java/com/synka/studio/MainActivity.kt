@@ -145,6 +145,17 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    override fun onResume() {
+        super.onResume()
+        SynkaOverlayService.refreshPermissionState(this)
+        SynkaOverlayService.setSynkaUiForeground(true)
+    }
+
+    override fun onPause() {
+        SynkaOverlayService.setSynkaUiForeground(false)
+        super.onPause()
+    }
+
     override fun onDestroy() {
         synkaEngine?.release()
         synkaEngine = null
@@ -194,10 +205,6 @@ class MainActivity : ComponentActivity() {
     }
 }
 
-// -----------------------------------------------------------------------------
-// Main Shell: ModalNavigationDrawer + Stage + Mini-Player + Bottom Dock + Sheet
-// -----------------------------------------------------------------------------
-
 @Composable
 private fun SynkaAppShell(engine: SynkaEngine) {
     val context = LocalContext.current
@@ -209,7 +216,6 @@ private fun SynkaAppShell(engine: SynkaEngine) {
     var activePresetSheet by remember { mutableStateOf<PresetSheetStateModel?>(null) }
     var jumpToDisplayStudioAfterSaf by remember { mutableStateOf(false) }
 
-    // Independent Display/Audio genre highlights and last-used preset memory per genre
     var activeDisplayGenre by remember { mutableStateOf<DisplayGenre?>(null) }
     var activeAudioGenre by remember { mutableStateOf<AudioGenre?>(null) }
     val lastUsedPresetByGenre = remember { mutableStateMapOf<String, String>() }
@@ -320,10 +326,13 @@ private fun SynkaAppShell(engine: SynkaEngine) {
         }
     }
 
-    val isAudioLoaded = engine.audioUri != null || (engine.visualUri != null && engine.visualIsVideo)
+    val isAudioLoaded = if (engine.audioUri != null) {
+        true
+    } else {
+        engine.visualUri != null && engine.visualIsVideo
+    }
     val isPresetSheetShowingVisual = activePresetSheet != null && activePresetSheet?.domain != PresetDomain.AUDIO
 
-    // Blur backdrop safely on API 33+ while ModalBottomSheet is open
     val backdropBlurRadius by animateDpAsState(
         targetValue = if (activePresetSheet != null) 10.dp else 0.dp,
         animationSpec = tween(durationMillis = 180),
@@ -337,9 +346,11 @@ private fun SynkaAppShell(engine: SynkaEngine) {
         Modifier
     }
 
+    val drawerGesturesEnabled = if (activeTab == SynkaTab.HOME) true else drawerState.isOpen
+
     ModalNavigationDrawer(
         drawerState = drawerState,
-        gesturesEnabled = activeTab == SynkaTab.HOME || drawerState.isOpen,
+        gesturesEnabled = drawerGesturesEnabled,
         drawerContent = {
             SettingsDrawerSheet(
                 engine = engine,
@@ -498,7 +509,6 @@ private fun SynkaAppShell(engine: SynkaEngine) {
                 )
             }
 
-            // Material3 ModalBottomSheet PresetSheet
             activePresetSheet?.let { sheetModel ->
                 PresetSheet(
                     engine = engine,
@@ -565,10 +575,6 @@ private fun SynkaAppShell(engine: SynkaEngine) {
         }
     }
 }
-
-// -----------------------------------------------------------------------------
-// Persistent Mini-Player Bar (Directly above Bottom Dock when audio is loaded)
-// -----------------------------------------------------------------------------
 
 @Composable
 private fun PersistentMiniPlayerBar(
@@ -675,10 +681,6 @@ private fun PersistentMiniPlayerBar(
     }
 }
 
-// -----------------------------------------------------------------------------
-// Persistent Bottom Dock: [Home]   [ Display EQ | EQ ]   [Local Media]
-// -----------------------------------------------------------------------------
-
 @Composable
 private fun PersistentBottomDock(
     activeTab: SynkaTab,
@@ -723,6 +725,7 @@ private fun PersistentBottomDock(
             val splitShape = RoundedCornerShape(50)
             val displaySelected = activeTab == SynkaTab.DISPLAY_EQ
             val audioSelected = activeTab == SynkaTab.AUDIO_EQ
+            val splitHighlighted = if (displaySelected) true else audioSelected
 
             Row(
                 modifier = Modifier
@@ -732,7 +735,7 @@ private fun PersistentBottomDock(
                     .background(colors.surface)
                     .border(
                         width = 1.dp,
-                        color = if (displaySelected || audioSelected) colors.activeAccent.copy(alpha = 0.7f) else colors.hairline,
+                        color = if (splitHighlighted) colors.activeAccent.copy(alpha = 0.7f) else colors.hairline,
                         shape = splitShape
                     ),
                 verticalAlignment = Alignment.CenterVertically
@@ -811,10 +814,6 @@ private fun PersistentBottomDock(
     }
 }
 
-// -----------------------------------------------------------------------------
-// Bottom Dock Vector Icons
-// -----------------------------------------------------------------------------
-
 @Composable
 private fun HomeHouseIcon(color: Color, modifier: Modifier = Modifier) {
     Canvas(modifier = modifier) {
@@ -852,10 +851,6 @@ private fun LocalMediaIcon(color: Color, modifier: Modifier = Modifier) {
         drawPath(path = folder, color = color, style = stroke)
     }
 }
-
-// -----------------------------------------------------------------------------
-// Preserved Chunk 1 Crash Catcher Screen
-// -----------------------------------------------------------------------------
 
 @Composable
 private fun CrashCatcherScreen(
