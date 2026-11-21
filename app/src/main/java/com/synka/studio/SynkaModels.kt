@@ -428,7 +428,7 @@ object SynkaBuiltInPresets {
         id = "builtin_kora",
         name = "Kora",
         domain = PresetDomain.BOTH,
-        displayGenre = DisplayGenre.FLAT_LIKE_DEFAULT(),
+        displayGenre = DisplayGenre.CINEMA_GRADE,
         audioGenre = AudioGenre.FLAT,
         arka = ArkaParams(),
         svara = SvaraParams(),
@@ -838,5 +838,3 @@ object SynkaBuiltInPresets {
         )
     }
 }
-
-private fun DisplayGenre.Companion.FLAT_LIKE_DEFAULT(): DisplayGenre = CINEMA_GRADE
