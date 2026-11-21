@@ -1,5 +1,4 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">Synka Studio</string>
-    <string name="synka_accessibility_desc">Applies Synka system-wide Warmth, Tint, Paper, and Subzero Dimmer filters across apps, and automatically hides over banking and permission screens.</string>
 </resources>
