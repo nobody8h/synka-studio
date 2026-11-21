@@ -182,17 +182,12 @@ fun HomeScreen(
     }
 }
 
-// -----------------------------------------------------------------------------
-// Compact 1-Tap System-Wide Toggle Bar (Screen Filter + Global Audio EQ)
-// -----------------------------------------------------------------------------
-
 @Composable
 private fun SystemWideQuickStrip(
     engine: SynkaEngine,
     onRequestAccessibilitySetup: () -> Unit
 ) {
     val context = LocalContext.current
-    val colors = LocalSynkaColors.current
 
     val notifPermissionLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestPermission()
@@ -214,7 +209,6 @@ private fun SystemWideQuickStrip(
         modifier = Modifier.fillMaxWidth(),
         horizontalArrangement = Arrangement.spacedBy(10.dp)
     ) {
-        // 1. System Screen Filter Pill
         SystemPillButton(
             title = "Screen (All Apps)",
             status = when {
@@ -235,7 +229,6 @@ private fun SystemWideQuickStrip(
             modifier = Modifier.weight(1f)
         )
 
-        // 2. System Audio EQ Pill
         SystemPillButton(
             title = "System Audio EQ",
             status = if (audioRunning) SvaraGlobalService.statusSummary else "Off",
@@ -418,10 +411,6 @@ private fun AccessibilitySetupDialog(onDismiss: () -> Unit) {
         }
     }
 }
-
-// -----------------------------------------------------------------------------
-// Discover & Search Modal powered by PresetShare.DiscoverCatalog
-// -----------------------------------------------------------------------------
 
 @Composable
 private fun DiscoverCatalogModal(
@@ -823,10 +812,6 @@ private fun DiscoverPresetCard(
     }
 }
 
-// -----------------------------------------------------------------------------
-// Top Bar: Physical ON/OFF Toggle | Discover Pill | Hamburger Menu
-// -----------------------------------------------------------------------------
-
 @Composable
 private fun HomeTopBar(
     isMasterEnabled: Boolean,
@@ -1084,10 +1069,6 @@ private fun UnlockRoadmapDialog(onDismiss: () -> Unit) {
     }
 }
 
-// -----------------------------------------------------------------------------
-// Center Live Preview Card (Visual Viewport + Before/After Hold + Audio Bar)
-// -----------------------------------------------------------------------------
-
 @Composable
 private fun LivePreviewCard(
     engine: SynkaEngine,
@@ -1119,7 +1100,6 @@ private fun LivePreviewCard(
         }
     }
 
-    // Identity-safe unbind so leaving Home never strips ArkaStudio's newly bound preview
     DisposableEffect(engine, textureViewRef, imageViewRef) {
         val tv = textureViewRef
         val iv = imageViewRef
@@ -1157,9 +1137,7 @@ private fun LivePreviewCard(
     ) {
         if (!isPreviewActive) return@LaunchedEffect
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            val bypass = isHoldingBeforeAfter |
-
-| !engine.isMasterEnabled
+            val bypass = if (isHoldingBeforeAfter) true else !engine.isMasterEnabled
             val activeView: View? = if (engine.visualUri != null && engine.visualIsVideo) {
                 textureViewRef
             } else {
@@ -1343,9 +1321,11 @@ private fun CompactAudioStatusBar(
     onPickAudioMedia: () -> Unit
 ) {
     val colors = LocalSynkaColors.current
-    val hasPlayableAudio = engine.audioUri != null |
-
-| (engine.visualUri != null && engine.visualIsVideo)
+    val hasPlayableAudio = if (engine.audioUri != null) {
+        true
+    } else {
+        engine.visualUri != null && engine.visualIsVideo
+    }
 
     val miniBars = remember { FloatArray(SvaraAudio.WAVEFORM_BARS) }
     var pulseTick by remember { mutableIntStateOf(0) }
@@ -1480,10 +1460,6 @@ private fun CompactAudioStatusBar(
         }
     }
 }
-
-// -----------------------------------------------------------------------------
-// Genre Deck: 4 Display Mode Cards + [ both 🔗 ] Link Pill + 4 For Audio Cards
-// -----------------------------------------------------------------------------
 
 @Composable
 private fun GenreDeckSection(
