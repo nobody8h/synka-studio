@@ -1,8 +1,10 @@
 package com.synka.studio
 
 import android.content.Context
+import android.content.Intent
 import android.graphics.Bitmap
 import android.graphics.ImageDecoder
+import android.media.audiofx.AudioEffect
 import android.net.Uri
 import android.os.Build
 import android.os.Handler
@@ -57,6 +59,9 @@ class SynkaEngine(context: Context) {
 
     @Volatile
     private var isReleased: Boolean = false
+
+    // Tracks the currently broadcast Android AudioEffect session ID
+    private var openedAudioSessionId: Int = C.AUDIO_SESSION_ID_UNSET
 
     // Shared DSP processor and GPU shader singleton
     val svaraAudio: SvaraAudio = SvaraAudio()
@@ -129,6 +134,7 @@ class SynkaEngine(context: Context) {
         private set
 
     // Weak view targets so screen switches rebind without leaking destroyed Android Views
+    private var boundContainerViewRef: WeakReference<View>? = null
     private var boundTextureViewRef: WeakReference<TextureView>? = null
     private var boundImageViewRef: WeakReference<ImageView>? = null
     private var loadedPlayerUri: Uri? = null
@@ -151,6 +157,7 @@ class SynkaEngine(context: Context) {
             syncPlaybackTelemetry()
             mainHandler.removeCallbacks(positionPoller)
             if (isPlaying) {
+                syncSystemAudioEffectSession()
                 mainHandler.postDelayed(positionPoller, POLL_INTERVAL_MS)
             }
         }
@@ -158,7 +165,9 @@ class SynkaEngine(context: Context) {
         override fun onPlaybackStateChanged(playbackState: Int) {
             if (isReleased) return
             syncPlaybackTelemetry()
-            if (playbackState == Player.STATE_ENDED) {
+            if (playbackState == Player.STATE_READY) {
+                syncSystemAudioEffectSession()
+            } else if (playbackState == Player.STATE_ENDED) {
                 isAudioPlaying = false
                 mainHandler.removeCallbacks(positionPoller)
             }
@@ -175,6 +184,9 @@ class SynkaEngine(context: Context) {
     }
 
     init {
+        // CRITICAL: enableFloatOutput MUST be false so DefaultAudioSink routes audio through
+        // ToInt16PcmAudioProcessor -> DefaultAudioProcessorChain -> svaraAudio instead of
+        // bypassing all custom AudioProcessors on API 30-36 CCodec float output.
         val renderersFactory = object : DefaultRenderersFactory(appContext) {
             override fun buildAudioSink(
                 context: Context,
@@ -183,11 +195,11 @@ class SynkaEngine(context: Context) {
             ): AudioSink {
                 return DefaultAudioSink.Builder(context)
                     .setAudioProcessors(arrayOf<AudioProcessor>(svaraAudio))
-                    .setEnableFloatOutput(enableFloatOutput)
+                    .setEnableFloatOutput(false)
                     .setEnableAudioTrackPlaybackParams(enableAudioTrackPlaybackParams)
                     .build()
             }
-        }.setEnableAudioFloatOutput(true)
+        }.setEnableAudioFloatOutput(false)
 
         val audioAttributes = AudioAttributes.Builder()
             .setUsage(C.USAGE_MEDIA)
@@ -259,9 +271,18 @@ class SynkaEngine(context: Context) {
     // Visual & Audio Target Binding and Media Loading
     // -------------------------------------------------------------------------
 
-    fun bindVisualTarget(textureView: TextureView?, imageView: ImageView?) {
+    fun bindVisualTarget(
+        textureView: TextureView?,
+        imageView: ImageView?,
+        containerView: View? = null
+    ) {
         runOnMain {
             if (isReleased) return@runOnMain
+
+            val previousContainer = boundContainerViewRef?.get()
+            if (previousContainer != null && previousContainer !== containerView) {
+                clearShaderSafely(previousContainer)
+            }
 
             val previousTexture = boundTextureViewRef?.get()
             if (previousTexture != null && previousTexture !== textureView) {
@@ -274,6 +295,7 @@ class SynkaEngine(context: Context) {
                 clearShaderSafely(previousImage)
             }
 
+            boundContainerViewRef = containerView?.let { WeakReference(it) }
             boundTextureViewRef = textureView?.let { WeakReference(it) }
             boundImageViewRef = imageView?.let { WeakReference(it) }
 
@@ -289,12 +311,46 @@ class SynkaEngine(context: Context) {
                     exoPlayer.clearVideoTextureView(textureView)
                     clearShaderSafely(textureView)
                 }
-                if (imageView != null) {
-                    loadImageIntoView(visualUri, imageView)
+                // Only decode/replace image when a user photo URI is actually selected;
+                // never wipe the caller's procedural calibration test chart when visualUri == null.
+                val activeUri = visualUri
+                if (imageView != null && activeUri != null) {
+                    loadImageIntoView(activeUri, imageView)
                 }
             }
 
             applyVisualShader()
+        }
+    }
+
+    /**
+     * Identity-checked unbind for DisposableEffect.onDispose so a departing screen or
+     * dismissing ModalBottomSheet can never strip the RenderEffect or detach video from
+     * a newly mounted screen that already called bindVisualTarget.
+     */
+    fun unbindVisualTarget(
+        textureView: TextureView?,
+        imageView: ImageView?,
+        containerView: View? = null
+    ) {
+        runOnMain {
+            if (isReleased) return@runOnMain
+
+            if (containerView != null && boundContainerViewRef?.get() === containerView) {
+                clearShaderSafely(containerView)
+                boundContainerViewRef = null
+            }
+
+            if (textureView != null && boundTextureViewRef?.get() === textureView) {
+                exoPlayer.clearVideoTextureView(textureView)
+                clearShaderSafely(textureView)
+                boundTextureViewRef = null
+            }
+
+            if (imageView != null && boundImageViewRef?.get() === imageView) {
+                clearShaderSafely(imageView)
+                boundImageViewRef = null
+            }
         }
     }
 
@@ -382,9 +438,15 @@ class SynkaEngine(context: Context) {
 
             applyBoundPresetsForUri(uri)
 
+            // Detach video surface AND clear stale video visual state so Home/ArkaStudio
+            // cleanly fall back to the live calibration test chart instead of a dead TextureView.
             if (playerCurrentlyVideo) {
                 boundTextureViewRef?.get()?.let { exoPlayer.clearVideoTextureView(it) }
                 playerCurrentlyVideo = false
+                if (visualIsVideo) {
+                    visualIsVideo = false
+                    visualUri = null
+                }
             }
 
             if (loadedPlayerUri != uri) {
@@ -393,7 +455,9 @@ class SynkaEngine(context: Context) {
                 exoPlayer.prepare()
             }
             exoPlayer.playWhenReady = true
+            syncSystemAudioEffectSession()
             syncPlaybackTelemetry()
+            applyVisualShader()
         }
     }
 
@@ -679,6 +743,8 @@ class SynkaEngine(context: Context) {
         mainHandler.removeCallbacks(positionPoller)
 
         val cleanupAction = {
+            closeSystemAudioEffectSession()
+            boundContainerViewRef?.get()?.let { clearShaderSafely(it) }
             boundTextureViewRef?.get()?.let { tv ->
                 exoPlayer.clearVideoTextureView(tv)
                 clearShaderSafely(tv)
@@ -686,6 +752,7 @@ class SynkaEngine(context: Context) {
             boundImageViewRef?.get()?.let { iv ->
                 clearShaderSafely(iv)
             }
+            boundContainerViewRef = null
             boundTextureViewRef = null
             boundImageViewRef = null
 
@@ -704,6 +771,40 @@ class SynkaEngine(context: Context) {
     }
 
     // -------------------------------------------------------------------------
+    // System AudioEffect Control Session Broadcasts
+    // -------------------------------------------------------------------------
+
+    private fun syncSystemAudioEffectSession() {
+        val sessionId = runCatching { exoPlayer.audioSessionId }.getOrDefault(C.AUDIO_SESSION_ID_UNSET)
+        if (sessionId == C.AUDIO_SESSION_ID_UNSET || sessionId <= 0) return
+        if (sessionId == openedAudioSessionId) return
+
+        closeSystemAudioEffectSession()
+        openedAudioSessionId = sessionId
+        runCatching {
+            val openIntent = Intent(AudioEffect.ACTION_OPEN_AUDIO_EFFECT_CONTROL_SESSION).apply {
+                putExtra(AudioEffect.EXTRA_AUDIO_SESSION, sessionId)
+                putExtra(AudioEffect.EXTRA_PACKAGE_NAME, appContext.packageName)
+                putExtra(AudioEffect.EXTRA_CONTENT_TYPE, AudioEffect.CONTENT_TYPE_MUSIC)
+            }
+            appContext.sendBroadcast(openIntent)
+        }
+    }
+
+    private fun closeSystemAudioEffectSession() {
+        val sessionId = openedAudioSessionId
+        if (sessionId == C.AUDIO_SESSION_ID_UNSET || sessionId <= 0) return
+        openedAudioSessionId = C.AUDIO_SESSION_ID_UNSET
+        runCatching {
+            val closeIntent = Intent(AudioEffect.ACTION_CLOSE_AUDIO_EFFECT_CONTROL_SESSION).apply {
+                putExtra(AudioEffect.EXTRA_AUDIO_SESSION, sessionId)
+                putExtra(AudioEffect.EXTRA_PACKAGE_NAME, appContext.packageName)
+            }
+            appContext.sendBroadcast(closeIntent)
+        }
+    }
+
+    // -------------------------------------------------------------------------
     // Internal DSP, Shader, Image & Telemetry Helpers
     // -------------------------------------------------------------------------
 
@@ -719,12 +820,19 @@ class SynkaEngine(context: Context) {
             if (isReleased) return@runOnMain
             if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) return@runOnMain
 
+            val container = boundContainerViewRef?.get()
             val textureView = boundTextureViewRef?.get()
             val imageView = boundImageViewRef?.get()
             val bypass = !_isMasterEnabled.value
             val params = _activeArka.value
 
-            if (visualIsVideo) {
+            if (container != null) {
+                // Preferred path: shade the wrapping FrameLayout so both ImageView and TextureView
+                // video frames composite through Skia/HWUI's RenderNode imageFilter reliably.
+                textureView?.let { arkaShader.clearFromView(it) }
+                imageView?.let { arkaShader.clearFromView(it) }
+                arkaShader.applyToView(container, params, bypass = bypass)
+            } else if (visualIsVideo) {
                 textureView?.let { arkaShader.applyToView(it, params, bypass = bypass) }
                 imageView?.let { arkaShader.clearFromView(it) }
             } else {
@@ -835,7 +943,6 @@ class SynkaEngine(context: Context) {
             .toSet()
 
     private fun loadPersistedState() {
-        // 1. User presets
         runCatching {
             val file = File(appContext.filesDir, FILE_USER_PRESETS)
             if (file.exists()) {
@@ -845,7 +952,6 @@ class SynkaEngine(context: Context) {
             }
         }
 
-        // 2. Favorites
         runCatching {
             val file = File(appContext.filesDir, FILE_FAVORITES)
             if (file.exists()) {
@@ -859,7 +965,6 @@ class SynkaEngine(context: Context) {
             }
         }
 
-        // 3. Theme & Link Preferences
         runCatching {
             val file = File(appContext.filesDir, FILE_PREFS)
             if (file.exists()) {
@@ -872,7 +977,6 @@ class SynkaEngine(context: Context) {
             }
         }
 
-        // 4. Per-file bindings
         runCatching {
             val file = File(appContext.filesDir, FILE_BINDINGS)
             if (file.exists()) {
