@@ -109,9 +109,10 @@ class SvaraAudio : BaseAudioProcessor() {
         if (encoding != C.ENCODING_PCM_16BIT && encoding != C.ENCODING_PCM_FLOAT) {
             throw UnhandledAudioFormatException(inputAudioFormat)
         }
-        if (inputAudioFormat.channelCount <= 0 |
-
-| inputAudioFormat.channelCount > MAX_CHANNELS) {
+        if (inputAudioFormat.channelCount <= 0) {
+            throw UnhandledAudioFormatException(inputAudioFormat)
+        }
+        if (inputAudioFormat.channelCount > MAX_CHANNELS) {
             throw UnhandledAudioFormatException(inputAudioFormat)
         }
 
@@ -186,12 +187,10 @@ class SvaraAudio : BaseAudioProcessor() {
                         var nextZ1 = c.b1 * x - c.a1 * y + z2[idx]
                         var nextZ2 = c.b2 * x - c.a2 * y
 
-                        if (abs(nextZ1) < DENORMAL_EPS |
-
-| !nextZ1.isFinite()) nextZ1 = 0.0
-                        if (abs(nextZ2) < DENORMAL_EPS |
-
-| !nextZ2.isFinite()) nextZ2 = 0.0
+                        if (abs(nextZ1) < DENORMAL_EPS) nextZ1 = 0.0
+                        if (!nextZ1.isFinite()) nextZ1 = 0.0
+                        if (abs(nextZ2) < DENORMAL_EPS) nextZ2 = 0.0
+                        if (!nextZ2.isFinite()) nextZ2 = 0.0
 
                         z1[idx] = nextZ1
                         z2[idx] = nextZ2
@@ -324,13 +323,13 @@ class SvaraAudio : BaseAudioProcessor() {
                 2 -> params.mi * 0.55f
                 3 -> params.mi * 0.45f
                 5 -> params.vo * 0.55f + nightSpeechBoostDb * 0.6f
-                6 -> params.vo * 0.55f + nightSpeechDb(nightSpeechBoostDb)
+                6 -> params.vo * 0.55f + nightSpeechBoostDb * 0.8f
                 7 -> params.tr * 0.55f + nightSpeechBoostDb * 0.3f
                 8 -> params.tr * 0.55f
                 else -> 0f
             }
             val totalGainDb = (band.gainDb + contourOffset).toDouble().coerceIn(-20.0, 20.0)
-            val freq = band.freqHz.toDouble().coerceIn(20.0, nyquistMaxOrSafe(nyquistSafeMax))
+            val freq = band.freqHz.toDouble().coerceIn(20.0, nyquistSafeMax)
             val q = band.q.toDouble().coerceIn(0.1, 20.0)
             coeffs[i + 1] = designPeakingEq(freq, q, totalGainDb, sr)
         }
@@ -360,10 +359,6 @@ class SvaraAudio : BaseAudioProcessor() {
             rightGain = rightGain
         )
     }
-
-    private fun nightSpeechDb(boost: Float): Float = boost * 0.8f
-
-    private fun nyquistMaxOrSafe(v: Double): Double = v
 
     private fun designPeakingEq(
         freqHz: Double,
@@ -441,9 +436,8 @@ class SvaraAudio : BaseAudioProcessor() {
         a1: Double,
         a2: Double
     ): BiquadCoeffs {
-        if (abs(a0) < 1e-12 |
-
-| !a0.isFinite()) return BiquadCoeffs()
+        if (abs(a0) < 1e-12) return BiquadCoeffs()
+        if (!a0.isFinite()) return BiquadCoeffs()
         val invA0 = 1.0 / a0
         return BiquadCoeffs(
             b0 = b0 * invA0,
