@@ -4,7 +4,6 @@ import android.Manifest
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
-import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.graphics.Canvas as AndroidCanvas
@@ -13,7 +12,6 @@ import android.graphics.LinearGradient
 import android.graphics.Paint
 import android.graphics.Shader
 import android.os.Build
-import android.provider.Settings
 import android.view.Gravity
 import android.view.TextureView
 import android.view.View
@@ -107,10 +105,27 @@ fun HomeScreen(
     onDiscoverPresetApplied: (SynkaPreset) -> Unit = {},
     modifier: Modifier = Modifier
 ) {
+    val context = LocalContext.current
     val colors = LocalSynkaColors.current
     var showUnlockDialog by remember { mutableStateOf(false) }
     var showDiscoverModal by remember { mutableStateOf(false) }
-    var showAccessibilitySetupDialog by remember { mutableStateOf(false) }
+    var showOverlaySetupDialog by remember { mutableStateOf(false) }
+    var awaitingOverlayGrant by remember { mutableStateOf(false) }
+    var returnedWithoutOverlayGrant by remember { mutableStateOf(false) }
+
+    LaunchedEffect(SynkaOverlayService.permissionCheckGeneration) {
+        if (awaitingOverlayGrant) {
+            awaitingOverlayGrant = false
+            if (SynkaOverlayService.hasOverlayPermission) {
+                returnedWithoutOverlayGrant = false
+                SynkaOverlayService.updateFromEngine(context, engine.activeArka, engine.isMasterEnabled)
+                SynkaOverlayService.start(context)
+            } else {
+                returnedWithoutOverlayGrant = true
+                showOverlaySetupDialog = true
+            }
+        }
+    }
 
     Column(
         modifier = modifier
@@ -141,7 +156,8 @@ fun HomeScreen(
 
         SystemWideQuickStrip(
             engine = engine,
-            onRequestAccessibilitySetup = { showAccessibilitySetupDialog = true }
+            returnedWithoutOverlayGrant = returnedWithoutOverlayGrant,
+            onRequestOverlaySetup = { showOverlaySetupDialog = true }
         )
 
         GenreDeckSection(
@@ -166,8 +182,17 @@ fun HomeScreen(
         UnlockRoadmapDialog(onDismiss = { showUnlockDialog = false })
     }
 
-    if (showAccessibilitySetupDialog) {
-        AccessibilitySetupDialog(onDismiss = { showAccessibilitySetupDialog = false })
+    if (showOverlaySetupDialog) {
+        OverlayPermissionSetupDialog(
+            emphasizeEcmUnlock = returnedWithoutOverlayGrant,
+            onOpenOverlaySettings = {
+                awaitingOverlayGrant = true
+                OverlayPermissionHelper.openOverlayPermissionSettings(context)
+            },
+            onDismiss = {
+                showOverlaySetupDialog = false
+            }
+        )
     }
 
     if (showDiscoverModal) {
@@ -185,11 +210,12 @@ fun HomeScreen(
 @Composable
 private fun SystemWideQuickStrip(
     engine: SynkaEngine,
-    onRequestAccessibilitySetup: () -> Unit
+    returnedWithoutOverlayGrant: Boolean,
+    onRequestOverlaySetup: () -> Unit
 ) {
     val context = LocalContext.current
 
-    val notifPermissionLauncher = rememberLauncherForActivityResult(
+    val audioNotifLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestPermission()
     ) {
         SvaraGlobalService.start(context)
@@ -201,8 +227,15 @@ private fun SystemWideQuickStrip(
         )
     }
 
-    val colorBound = SynkaColorService.isServiceBound
-    val colorEnabled = colorBound && SynkaColorService.isSystemColorEnabled
+    val overlayNotifLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestPermission()
+    ) {
+        SynkaOverlayService.updateFromEngine(context, engine.activeArka, engine.isMasterEnabled)
+        SynkaOverlayService.start(context)
+    }
+
+    val hasOverlayPerm = SynkaOverlayService.hasOverlayPermission
+    val overlayRunning = SynkaOverlayService.isRunning
     val audioRunning = SvaraGlobalService.isRunning
 
     Row(
@@ -212,18 +245,29 @@ private fun SystemWideQuickStrip(
         SystemPillButton(
             title = "Screen (All Apps)",
             status = when {
-                !colorBound -> "Tap to Enable"
-                colorEnabled -> SynkaColorService.statusSummary
+                !hasOverlayPerm && returnedWithoutOverlayGrant -> "Restricted? Tap to Unlock"
+                !hasOverlayPerm -> "Tap to Enable"
+                overlayRunning -> SynkaOverlayService.statusSummary
                 else -> "Off"
             },
-            isActive = colorEnabled,
+            isActive = overlayRunning && !SynkaOverlayService.isPausedByUser,
             onClick = {
-                if (!colorBound) {
-                    onRequestAccessibilitySetup()
+                if (!hasOverlayPerm) {
+                    onRequestOverlaySetup()
+                } else if (overlayRunning) {
+                    SynkaOverlayService.stop(context)
                 } else {
-                    val next = !SynkaColorService.isSystemColorEnabled
-                    SynkaColorService.updateFromEngine(context, engine.activeArka, engine.isMasterEnabled)
-                    SynkaColorService.setEnabled(context, next)
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+                        ContextCompat.checkSelfPermission(
+                            context,
+                            Manifest.permission.POST_NOTIFICATIONS
+                        ) != PackageManager.PERMISSION_GRANTED
+                    ) {
+                        overlayNotifLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+                    } else {
+                        SynkaOverlayService.updateFromEngine(context, engine.activeArka, engine.isMasterEnabled)
+                        SynkaOverlayService.start(context)
+                    }
                 }
             },
             modifier = Modifier.weight(1f)
@@ -243,7 +287,7 @@ private fun SystemWideQuickStrip(
                             Manifest.permission.POST_NOTIFICATIONS
                         ) != PackageManager.PERMISSION_GRANTED
                     ) {
-                        notifPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+                        audioNotifLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
                     } else {
                         SvaraGlobalService.start(context)
                         SvaraGlobalService.updateFromEngine(
@@ -314,9 +358,22 @@ private fun SystemPillButton(
 }
 
 @Composable
-private fun AccessibilitySetupDialog(onDismiss: () -> Unit) {
+private fun OverlayPermissionSetupDialog(
+    emphasizeEcmUnlock: Boolean,
+    onOpenOverlaySettings: () -> Unit,
+    onDismiss: () -> Unit
+) {
     val context = LocalContext.current
     val colors = LocalSynkaColors.current
+    val installReport = remember { OverlayPermissionHelper.inspectInstallSource(context) }
+    val isOnePlus = remember { OverlayPermissionHelper.isOnePlusOrOplusDevice() }
+    val onCall = remember { OverlayPermissionHelper.isPhoneCallActive(context) }
+    val showEcmGuide = when {
+        emphasizeEcmUnlock -> true
+        installReport.isEcmLikelyForOverlay -> true
+        Build.VERSION.SDK_INT >= OverlayPermissionHelper.ANDROID_15_API -> true
+        else -> false
+    }
 
     Dialog(onDismissRequest = onDismiss) {
         Column(
@@ -329,17 +386,25 @@ private fun AccessibilitySetupDialog(onDismiss: () -> Unit) {
             verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
             Text(
-                text = "Enable System Screen Filter",
+                text = "Enable Screen Filter Overlay",
                 style = MaterialTheme.typography.titleMedium,
                 fontWeight = FontWeight.SemiBold,
                 color = colors.primaryText
             )
 
             Text(
-                text = "Applies Warmth, Tint, Paper Matte, RGB Trim, and Subzero Dimmer over YouTube, Gallery, and video players with zero root or PC.",
+                text = "Uses Display over other apps (touch-safe, no Accessibility needed) to apply Warmth, Paper, RGB Trim, and OLED Dimming over YouTube, Gallery, and video players.",
                 style = MaterialTheme.typography.bodySmall,
                 color = colors.secondaryText
             )
+
+            if (onCall) {
+                Text(
+                    text = "Active phone call detected: Android 16 may block security toggles until the call ends.",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = SynkaPalette.SindoorCrimson
+                )
+            }
 
             Column(
                 modifier = Modifier
@@ -348,63 +413,105 @@ private fun AccessibilitySetupDialog(onDismiss: () -> Unit) {
                     .background(colors.background)
                     .border(1.dp, colors.hairline, RoundedCornerShape(12.dp))
                     .padding(12.dp),
-                verticalArrangement = Arrangement.spacedBy(5.dp)
+                verticalArrangement = Arrangement.spacedBy(6.dp)
             ) {
                 Text(
-                    text = "SIMPLE 2-STEP SETUP",
+                    text = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                        "STEP 1 • ALLOW DISPLAY OVER OTHER APPS"
+                    } else {
+                        "ALLOW DISPLAY OVER OTHER APPS"
+                    },
                     style = MaterialTheme.typography.labelSmall,
                     color = colors.activeAccent
                 )
                 Text(
-                    text = "1. Tap 'Open Accessibility' below.\n2. Under Downloaded apps, turn ON 'Synka Screen Filter'.\n\nBanking apps, permission popups, and DRM layers are auto-cloaked.",
+                    text = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                        "Tap 'Open Overlay Settings', locate 'Synka Studio' in the list, and turn it ON."
+                    } else {
+                        "Tap 'Open Overlay Settings' and turn ON the toggle for Synka Studio."
+                    },
                     style = MaterialTheme.typography.bodySmall,
                     color = colors.primaryText
                 )
+
+                if (showEcmGuide) {
+                    HorizontalDivider(
+                        modifier = Modifier.padding(vertical = 4.dp),
+                        thickness = 1.dp,
+                        color = colors.hairline
+                    )
+                    Text(
+                        text = if (isOnePlus) {
+                            "GREYED OUT ON OXYGENOS 15/16? (SIDELOADED APK)"
+                        } else {
+                            "GREYED OUT ON ANDROID 15/16? (SIDELOADED APK)"
+                        },
+                        style = MaterialTheme.typography.labelSmall,
+                        color = if (emphasizeEcmUnlock) SynkaPalette.SindoorCrimson else SynkaPalette.KansaBronze
+                    )
+                    Text(
+                        text = "1. Tap the greyed-out toggle once so 'Restricted setting' appears, then dismiss it.\n2. Return here and tap 'Open App Info' below.\n3. Tap top-right ⋮ -> 'Allow restricted settings' + PIN.\n4. Return to Overlay Settings and turn Synka ON.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = colors.secondaryText
+                    )
+                }
             }
 
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(10.dp)
-            ) {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 Box(
                     modifier = Modifier
-                        .weight(1f)
+                        .fillMaxWidth()
                         .clip(RoundedCornerShape(10.dp))
-                        .background(colors.elevatedSurface)
-                        .border(1.dp, colors.hairline, RoundedCornerShape(10.dp))
-                        .clickable(onClick = onDismiss)
-                        .padding(vertical = 10.dp),
+                        .background(colors.activeAccent)
+                        .clickable {
+                            onOpenOverlaySettings()
+                            onDismiss()
+                        }
+                        .padding(vertical = 11.dp),
                     contentAlignment = Alignment.Center
                 ) {
                     Text(
-                        text = "Cancel",
+                        text = "Open Overlay Settings",
                         style = MaterialTheme.typography.labelMedium,
-                        color = colors.primaryText
+                        fontWeight = FontWeight.Bold,
+                        color = SynkaPalette.ObsidianCharcoal
                     )
+                }
+
+                if (showEcmGuide) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(10.dp))
+                            .background(colors.elevatedSurface)
+                            .border(1.dp, colors.hairline, RoundedCornerShape(10.dp))
+                            .clickable {
+                                OverlayPermissionHelper.openAppInfoSettings(context)
+                                onDismiss()
+                            }
+                            .padding(vertical = 10.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(
+                            text = "Open App Info (⋮ → Allow Restricted Settings)",
+                            style = MaterialTheme.typography.labelSmall,
+                            fontWeight = FontWeight.SemiBold,
+                            color = colors.primaryText
+                        )
+                    }
                 }
 
                 Box(
                     modifier = Modifier
-                        .weight(1.4f)
-                        .clip(RoundedCornerShape(10.dp))
-                        .background(colors.activeAccent)
-                        .clickable {
-                            runCatching {
-                                context.startActivity(
-                                    Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)
-                                        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                                )
-                            }
-                            onDismiss()
-                        }
-                        .padding(vertical = 10.dp),
+                        .fillMaxWidth()
+                        .clickable(onClick = onDismiss)
+                        .padding(vertical = 6.dp),
                     contentAlignment = Alignment.Center
                 ) {
                     Text(
-                        text = "Open Accessibility",
-                        style = MaterialTheme.typography.labelMedium,
-                        fontWeight = FontWeight.Bold,
-                        color = SynkaPalette.ObsidianCharcoal
+                        text = "Cancel",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = colors.secondaryText
                     )
                 }
             }
@@ -1040,7 +1147,7 @@ private fun UnlockRoadmapDialog(onDismiss: () -> Unit) {
                     color = colors.secondaryText
                 )
                 Text(
-                    text = "Screen Filter uses Android Accessibility Overlay for global Warmth, Tint, Paper, and Subzero Dimming (auto-cloaks on banking apps & DRM). System Audio EQ uses DynamicsProcessing across media apps while pausing during calls.",
+                    text = "Screen Filter uses Display over other apps (touch-safe overlay) for global Warmth, Tint, Paper, and Subzero Dimming (automatically hidden on sensitive OS/banking prompts). System Audio EQ uses DynamicsProcessing across media apps while pausing during calls.",
                     style = MaterialTheme.typography.bodySmall,
                     color = colors.secondaryText
                 )
