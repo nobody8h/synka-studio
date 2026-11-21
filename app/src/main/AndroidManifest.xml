@@ -1,72 +1,66 @@
 <?xml version="1.0" encoding="utf-8"?>
-<manifest xmlns:android="http://schemas.android.com/apk/res/android"
-    xmlns:tools="http://schemas.android.com/tools">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
-    <!-- MediaStore library perm[span_235](start_span)[span_235](end_span)[span_237](start_span)[span_237](end_span)issions (Android 13+ / API 33+) -->
-    <uses-permission android:name="android.permission.READ_MEDIA_VIDEO" />
-    <uses-permission android:name="android.permission.READ_MEDIA_AUDIO" />
-    <uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />
+    <!-- Existing Synka Studio Audio Permission (keep any media/storage permissions from v1) -->
+    <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
 
-    <!-- Legacy storage fallback for Android 12 and below (API <= 32) -->
-    <uses-permission
-        android:name="android.permission.READ_EXTERNAL_STORAGE"
-        android:maxSdkVersion="32" />
-
-    <!-- Optional background fetch for Discover community preset catalog -->
-    <uses-permission android:name="android.permission.INTERNET" />
-
-    <!-- System-wide Display Filter (TYPE_APPLICATION_OVERLAY + specialUse FGS) -->
+    <!-- Step 1: Display EQ Permissions -->
     <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
-
-    <!-- Optional power-user ADB grant for hardware Monochrome (B&W) daltonizer -->
-    <uses-permission
-        android:name="android.permission.WRITE_SECURE_SETTINGS"
-        tools:ignore="ProtectedPermissions" />
-
-    <!-- System-wide Audio EQ (DynamicsProcessing + mediaPlayback FGS) -->
-    <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
-    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
-
-    <!-- Optional on API 33+ so ongoing FGS pause/off controls appear in drawer -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
     <application
         android:allowBackup="true"
-        android:hardwareAccelerated="true"
         android:label="@string/app_name"
         android:supportsRtl="true"
         android:theme="@android:style/Theme.Material.NoActionBar">
 
+        <!-- Preserve your existing android:icon / android:roundIcon / android:theme attributes if present -->
+
         <activity
             android:name=".MainActivity"
-            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboardHidden"
-            android:exported="true"
-            android:hardwareAccelerated="true"
-            android:theme="@android:style/Theme.Material.NoActionBar"
-            android:windowSoftInputMode="adjustResize">
+            android:exported="true">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
 
-        <!-- Primary System-wide Display Filter via TYPE_APPLICATION_OVERLAY -->
+        <!-- Step 1: Shizuku IPC Provider -->
+        <provider
+            android:name="rikka.shizuku.ShizukuProvider"
+            android:authorities="${applicationId}.shizuku"
+            android:enabled="true"
+            android:exported="true"
+            android:multiprocess="false"
+            android:permission="android.permission.INTERACT_ACROSS_USERS_FULL" />
+
+        <!-- Step 1: Display EQ Foreground Service (Android 14-16 specialUse compliant) -->
         <service
-            android:name=".SynkaOverlayService"
+            android:name=".display.service.DisplayEqForegroundService"
+            android:enabled="true"
             android:exported="false"
             android:foregroundServiceType="specialUse">
             <property
                 android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
-                android:value="Provides a user-activated, real-time system-wide screen warmth, matte paper, RGB trim, and OLED subzero dimming overlay using TYPE_APPLICATION_OVERLAY with persistent pause and off controls." />
+                android:value="User-activated system-wide display dimmer and visual comfort color filter overlay." />
         </service>
 
-        <!-- System-wide Audio EQ via DynamicsProcessing -->
+        <!-- Step 1: Optional Trusted Accessibility Overlay (fixed exported="true"; reads zero content) -->
         <service
-            android:name=".SvaraGlobalService"
-            android:exported="false"
-            android:foregroundServiceType="mediaPlayback" />
+            android:name=".display.service.DisplayOverlayAccessibilityService"
+            android:enabled="true"
+            android:exported="true"
+            android:label="@string/synka_display_a11y_label"
+            android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
+            <intent-filter>
+                <action android:name="android.accessibilityservice.AccessibilityService" />
+            </intent-filter>
+            <meta-data
+                android:name="android.accessibilityservice"
+                android:resource="@xml/synka_display_a11y_config" />
+        </service>
 
     </application>
 
