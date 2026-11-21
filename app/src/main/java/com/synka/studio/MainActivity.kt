@@ -4,99 +4,85 @@ import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
-import android.graphics.BitmapFactory
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
-import android.os.Handler
-import android.os.Looper
 import android.os.Process
-import android.view.Gravity
-import android.view.TextureView
-import android.view.ViewGroup
-import android.widget.FrameLayout
-import android.widget.ImageView
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.annotation.OptIn
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
-import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.systemBarsPadding
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
-import androidx.compose.material3.ButtonDefaults
-import androidx.compose.material3.FilterChip
-import androidx.compose.material3.FilterChipDefaults
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
-import androidx.compose.material3.Slider
 import androidx.compose.material3.Surface
-import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
-import androidx.compose.material3.darkColorScheme
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
-import androidx.compose.runtime.mutableLongStateOf
+import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.StrokeJoin
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.compose.ui.viewinterop.AndroidView
-import androidx.media3.common.MediaItem
-import androidx.media3.common.Player
-import androidx.media3.common.audio.AudioProcessor
-import androidx.media3.common.util.UnstableApi
-import androidx.media3.exoplayer.DefaultRenderersFactory
-import androidx.media3.exoplayer.ExoPlayer
-import androidx.media3.exoplayer.audio.AudioSink
-import androidx.media3.exoplayer.audio.DefaultAudioSink
 import kotlinx.coroutines.delay
 import java.io.File
 import java.io.PrintWriter
 import java.io.StringWriter
-import java.util.Locale
 import kotlin.system.exitProcess
 
-private enum class MediaMode {
-    NONE,
-    VIDEO,
-    PHOTO,
-    AUDIO
+private enum class SynkaTab {
+    HOME,
+    DISPLAY_EQ,
+    AUDIO_EQ,
+    LOCAL_MEDIA
 }
 
-private data class QuickPresetChip(
-    val chipLabel: String,
-    val preset: SynkaPreset
+private data class PresetSheetRequest(
+    val domain: PresetDomain,
+    val genre: String
 )
 
 class MainActivity : ComponentActivity() {
@@ -104,6 +90,8 @@ class MainActivity : ComponentActivity() {
     companion object {
         private const val CRASH_FILE_NAME = "last_crash.txt"
     }
+
+    private var synkaEngine: SynkaEngine? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         installCrashCatcher()
@@ -116,26 +104,22 @@ class MainActivity : ComponentActivity() {
             null
         }
 
-        val synkaDarkColors = darkColorScheme(
-            background = Color(0xFF121212),
-            surface = Color(0xFF1E1E1E),
-            primary = Color(0xFFD49A45),
-            onPrimary = Color(0xFF121212),
-            error = Color(0xFFCF6679),
-            onError = Color(0xFF000000),
-            onBackground = Color(0xFFE3E3E3),
-            onSurface = Color(0xFFE3E3E3)
-        )
+        val engine = if (existingCrashLog == null) {
+            SynkaEngine(applicationContext).also { synkaEngine = it }
+        } else {
+            null
+        }
 
         setContent {
-            MaterialTheme(colorScheme = synkaDarkColors) {
+            val themeMode = engine?.themeMode ?: SynkaThemeMode.STUDIO_REFERENCE
+            SynkaTheme(mode = themeMode) {
                 Surface(
                     modifier = Modifier.fillMaxSize(),
-                    color = MaterialTheme.colorScheme.background
+                    color = LocalSynkaColors.current.background
                 ) {
-                    if (existingCrashLog != null) {
+                    if (existingCrashLog != null || engine == null) {
                         CrashCatcherScreen(
-                            stackTrace = existingCrashLog,
+                            stackTrace = existingCrashLog ?: "Engine initialization aborted.",
                             onClearAndRelaunch = {
                                 if (crashFile.exists()) {
                                     crashFile.delete()
@@ -144,11 +128,17 @@ class MainActivity : ComponentActivity() {
                             }
                         )
                     } else {
-                        SynkaSpikeScreen()
+                        SynkaAppShell(engine = engine)
                     }
                 }
             }
         }
+    }
+
+    override fun onDestroy() {
+        synkaEngine?.release()
+        synkaEngine = null
+        super.onDestroy()
     }
 
     private fun installCrashCatcher() {
@@ -194,89 +184,26 @@ class MainActivity : ComponentActivity() {
     }
 }
 
-@OptIn(UnstableApi::class)
+// -----------------------------------------------------------------------------
+// Main Shell: Content Stage + Persistent Mini-Player + Persistent Bottom Dock
+// -----------------------------------------------------------------------------
+
 @Composable
-private fun SynkaSpikeScreen() {
+private fun SynkaAppShell(engine: SynkaEngine) {
     val context = LocalContext.current
+    val colors = LocalSynkaColors.current
 
-    val quickArkaPresets = remember {
-        listOf(
-            QuickPresetChip("Kora", SynkaBuiltInPresets.KORA),
-            QuickPresetChip("Cinema Grade", SynkaBuiltInPresets.CINEMA_TEAL_GOLD),
-            QuickPresetChip("Red Iso", SynkaBuiltInPresets.RED_ISO_CRIMSON_LOCK),
-            QuickPresetChip("B&W", SynkaBuiltInPresets.BW_SILVER_GELATIN),
-            QuickPresetChip("Warm", SynkaBuiltInPresets.WARM_GOLDEN_HOUR)
-        )
-    }
+    var activeTab by remember { mutableStateOf(SynkaTab.HOME) }
+    var isDrawerOpen by remember { mutableStateOf(false) }
+    var isDiscoverOpen by remember { mutableStateOf(false) }
+    var activePresetSheet by remember { mutableStateOf<PresetSheetRequest?>(null) }
 
-    val quickAudioPresets = remember {
-        listOf(
-            QuickPresetChip("Flat", SynkaBuiltInPresets.AUDIO_STUDIO_FLAT),
-            QuickPresetChip("Bass", SynkaBuiltInPresets.AUDIO_SUB_BASS_PUNCH),
-            QuickPresetChip("Vocal", SynkaBuiltInPresets.AUDIO_VOCAL_CLARITY),
-            QuickPresetChip("Late Night", SynkaBuiltInPresets.AUDIO_LATE_NIGHT_SOFT)
-        )
-    }
+    // Track independent Display/Audio genre highlights and last-used preset per genre
+    var activeDisplayGenre by remember { mutableStateOf<DisplayGenre?>(null) }
+    var activeAudioGenre by remember { mutableStateOf<AudioGenre?>(null) }
+    val lastUsedPresetByGenre = remember { mutableStateMapOf<String, String>() }
 
-    val svaraAudio = remember { SvaraAudio() }
-    val exoPlayer = remember {
-        val renderersFactory = object : DefaultRenderersFactory(context) {
-            override fun buildAudioSink(
-                context: Context,
-                enableFloatOutput: Boolean,
-                enableAudioTrackPlaybackParams: Boolean
-            ): AudioSink {
-                return DefaultAudioSink.Builder(context)
-                    .setAudioProcessors(arrayOf<AudioProcessor>(svaraAudio))
-                    .build()
-            }
-        }
-        ExoPlayer.Builder(context, renderersFactory).build()
-    }
-
-    var mediaMode by remember { mutableStateOf(MediaMode.NONE) }
-    var mediaLabel by remember { mutableStateOf("No media loaded") }
-    var photoUri by remember { mutableStateOf<Uri?>(null) }
-
-    var isPlaying by remember { mutableStateOf(false) }
-    var currentPositionMs by remember { mutableLongStateOf(0L) }
-    var durationMs by remember { mutableLongStateOf(0L) }
-    var isScrubbing by remember { mutableStateOf(false) }
-
-    // Arka visual state
-    var selectedArkaPreset by remember { mutableStateOf(quickArkaPresets.first().preset) }
-    var subzeroDimmer by remember { mutableFloatStateOf(selectedArkaPreset.arka.subzeroDimmer) }
-    var bypassShader by remember { mutableStateOf(false) }
-
-    // Svara DSP verification state
-    var selectedAudioPreset by remember { mutableStateOf(quickAudioPresets.first().preset) }
-    var stressTest12Db by remember { mutableStateOf(false) }
-    var bypassAudio by remember { mutableStateOf(false) }
-
-    // Pre-allocated 48-bar buffer read lock-free for Canvas draw pass
-    val waveformBars = remember { FloatArray(SvaraAudio.WAVEFORM_BARS) }
-    var waveformFrameTick by remember { mutableIntStateOf(0) }
-
-    var textureViewRef by remember { mutableStateOf<TextureView?>(null) }
-    var imageViewRef by remember { mutableStateOf<ImageView?>(null) }
-
-    val activeArkaParams = remember(selectedArkaPreset, subzeroDimmer) {
-        selectedArkaPreset.arka.copy(subzeroDimmer = subzeroDimmer).normalized()
-    }
-
-    val activeSvaraParams = remember(selectedAudioPreset, stressTest12Db) {
-        val base = selectedAudioPreset.svara
-        if (stressTest12Db) {
-            base.copy(
-                preAmpDb = 12f,
-                antiCrackle = maxOf(base.antiCrackle, 90f)
-            ).normalized()
-        } else {
-            base.normalized()
-        }
-    }
-
-    fun persistUri(uri: Uri) {
+    fun takeReadPermission(uri: Uri) {
         runCatching {
             context.contentResolver.takePersistableUriPermission(
                 uri,
@@ -285,600 +212,958 @@ private fun SynkaSpikeScreen() {
         }
     }
 
-    val videoPicker = rememberLauncherForActivityResult(
+    val visualMediaPicker = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.OpenDocument()
     ) { uri ->
         if (uri != null) {
-            persistUri(uri)
-            photoUri = null
-            mediaMode = MediaMode.VIDEO
-            mediaLabel = uri.lastPathSegment ?: uri.toString()
-            textureViewRef?.let { tv ->
-                tv.visibility = android.view.View.VISIBLE
-                imageViewRef?.visibility = android.view.View.GONE
-                exoPlayer.setVideoTextureView(tv)
-            }
-            exoPlayer.setMediaItem(MediaItem.fromUri(uri))
-            exoPlayer.prepare()
-            exoPlayer.playWhenReady = true
+            takeReadPermission(uri)
+            val mime = context.contentResolver.getType(uri).orEmpty()
+            val isVideo = mime.startsWith("video/")
+            engine.setVisualMedia(uri = uri, isVideo = isVideo)
         }
     }
 
-    val photoPicker = rememberLauncherForActivityResult(
+    val audioMediaPicker = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.OpenDocument()
     ) { uri ->
         if (uri != null) {
-            persistUri(uri)
-            exoPlayer.pause()
-            mediaMode = MediaMode.PHOTO
-            photoUri = uri
-            mediaLabel = uri.lastPathSegment ?: uri.toString()
-            textureViewRef?.let { tv ->
-                exoPlayer.clearVideoTextureView(tv)
-                tv.visibility = android.view.View.GONE
+            takeReadPermission(uri)
+            engine.setAudioMedia(uri = uri)
+        }
+    }
+
+    fun applyDisplayGenreFromDeck(genre: DisplayGenre) {
+        if (engine.isLinkedBoth) {
+            engine.applyGenreQuick(genre)
+            activeDisplayGenre = genre
+            activeAudioGenre = SynkaBuiltInPresets.linkedAudioGenreFor(genre)
+        } else {
+            val rememberedId = lastUsedPresetByGenre["${PresetDomain.DISPLAY.name}:${genre.name}"]
+            val rememberedPreset = engine.findPresetById(rememberedId)
+            if (rememberedPreset != null && rememberedPreset.domain == PresetDomain.DISPLAY) {
+                engine.applyPreset(rememberedPreset)
+            } else {
+                engine.applyGenreQuick(genre)
             }
-            imageViewRef?.let { iv ->
-                iv.visibility = android.view.View.VISIBLE
-                runCatching {
-                    context.contentResolver.openInputStream(uri)?.use { stream ->
-                        val bitmap = BitmapFactory.decodeStream(stream)
-                        iv.setImageBitmap(bitmap)
+            activeDisplayGenre = genre
+        }
+        engine.activePresetId?.let { id ->
+            lastUsedPresetByGenre["${PresetDomain.DISPLAY.name}:${genre.name}"] = id
+        }
+    }
+
+    fun applyAudioGenreFromDeck(genre: AudioGenre) {
+        if (engine.isLinkedBoth) {
+            engine.applyGenreQuick(genre)
+            activeAudioGenre = genre
+            activeDisplayGenre = SynkaBuiltInPresets.linkedDisplayGenreFor(genre)
+        } else {
+            val rememberedId = lastUsedPresetByGenre["${PresetDomain.AUDIO.name}:${genre.name}"]
+            val rememberedPreset = engine.findPresetById(rememberedId)
+            if (rememberedPreset != null && rememberedPreset.domain == PresetDomain.AUDIO) {
+                engine.applyPreset(rememberedPreset)
+            } else {
+                engine.applyGenreQuick(genre)
+            }
+            activeAudioGenre = genre
+        }
+        engine.activePresetId?.let { id ->
+            lastUsedPresetByGenre["${PresetDomain.AUDIO.name}:${genre.name}"] = id
+        }
+    }
+
+    val isAudioLoaded = engine.audioUri != null || (engine.visualUri != null && engine.visualIsVideo)
+
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(colors.background)
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .statusBarsPadding()
+        ) {
+            Box(
+                modifier = Modifier
+                    .weight(1f)
+                    .fillMaxWidth()
+            ) {
+                when (activeTab) {
+                    SynkaTab.HOME -> {
+                        HomeScreen(
+                            engine = engine,
+                            activeDisplayGenre = activeDisplayGenre,
+                            activeAudioGenre = activeAudioGenre,
+                            onDiscoverClick = { isDiscoverOpen = true },
+                            onOpenDrawer = { isDrawerOpen = true },
+                            onPickVisualMedia = {
+                                visualMediaPicker.launch(arrayOf("image/*", "video/*"))
+                            },
+                            onPickAudioMedia = {
+                                audioMediaPicker.launch(arrayOf("audio/*"))
+                            },
+                            onDisplayGenreTap = { genre -> applyDisplayGenreFromDeck(genre) },
+                            onAudioGenreTap = { genre -> applyAudioGenreFromDeck(genre) },
+                            onOpenPresetSheet = { domain, genre ->
+                                activePresetSheet = PresetSheetRequest(domain = domain, genre = genre)
+                            }
+                        )
+                    }
+                    SynkaTab.DISPLAY_EQ -> {
+                        PlaceholderWorkspaceBox(
+                            title = "Display EQ (Arka)",
+                            subtitle = "Placeholder for Chunks 8–9 • 8-Channel HSL, 5-Zone Tone EQ, Dual Globes, and Subzero Dimmer.",
+                            statusLine = "Master: ${if (engine.isMasterEnabled) "ON" else "OFF"} • Active Preset: ${engine.findPresetById(engine.activePresetId)?.name ?: "Custom"}",
+                            actionLabel = "Back to Home",
+                            onAction = { activeTab = SynkaTab.HOME }
+                        )
+                    }
+                    SynkaTab.AUDIO_EQ -> {
+                        PlaceholderWorkspaceBox(
+                            title = "Audio EQ (Svara)",
+                            subtitle = "Placeholder for Chunk 10 • 10-Band Parametric EQ, 5-Zone Sound Contour, Dual Globes, and Anti-Crackle Limiter.",
+                            statusLine = "DSP: ${engine.svaraAudio.activeSampleRate} Hz • ${engine.svaraAudio.activeEncodingLabel()} • Pre ${String.format(java.util.Locale.US, "%+.1f", engine.activeSvara.preAmpDb)} dB",
+                            actionLabel = "Back to Home",
+                            onAction = { activeTab = SynkaTab.HOME }
+                        )
+                    }
+                    SynkaTab.LOCAL_MEDIA -> {
+                        LocalMediaPlaceholderBox(
+                            engine = engine,
+                            onPickVisual = { visualMediaPicker.launch(arrayOf("image/*", "video/*")) },
+                            onPickAudio = { audioMediaPicker.launch(arrayOf("audio/*")) },
+                            onJumpHome = { activeTab = SynkaTab.HOME }
+                        )
                     }
                 }
             }
-        }
-    }
 
-    val audioPicker = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.OpenDocument()
-    ) { uri ->
-        if (uri != null) {
-            persistUri(uri)
-            photoUri = null
-            mediaMode = MediaMode.AUDIO
-            mediaLabel = uri.lastPathSegment ?: uri.toString()
-            textureViewRef?.let { tv ->
-                exoPlayer.clearVideoTextureView(tv)
-                tv.visibility = android.view.View.GONE
-            }
-            imageViewRef?.visibility = android.view.View.GONE
-            exoPlayer.setMediaItem(MediaItem.fromUri(uri))
-            exoPlayer.prepare()
-            exoPlayer.playWhenReady = true
-        }
-    }
-
-    DisposableEffect(exoPlayer) {
-        val listener = object : Player.Listener {
-            override fun onIsPlayingChanged(playing: Boolean) {
-                isPlaying = playing
+            if (isAudioLoaded) {
+                PersistentMiniPlayerBar(
+                    engine = engine,
+                    onTapJumpToEq = { activeTab = SynkaTab.AUDIO_EQ }
+                )
             }
 
-            override fun onPlaybackStateChanged(playbackState: Int) {
-                val dur = exoPlayer.duration
-                durationMs = if (dur > 0L) dur else 0L
-            }
+            PersistentBottomDock(
+                activeTab = activeTab,
+                onSelectTab = { activeTab = it }
+            )
         }
-        exoPlayer.addListener(listener)
 
-        onDispose {
-            exoPlayer.removeListener(listener)
-            textureViewRef?.let { exoPlayer.clearVideoTextureView(it) }
-            exoPlayer.release()
+        // PresetSheet Placeholder Overlay (to be replaced in Chunks 12–13)
+        activePresetSheet?.let { request ->
+            PresetSheetPlaceholderOverlay(
+                request = request,
+                engine = engine,
+                onSelectPreset = { preset ->
+                    engine.applyPreset(preset)
+                    if (preset.id != SynkaBuiltInPresets.KORA.id) {
+                        preset.displayGenre?.let { activeDisplayGenre = it }
+                        preset.audioGenre?.let { activeAudioGenre = it }
+                    }
+                    lastUsedPresetByGenre["${request.domain.name}:${request.genre}"] = preset.id
+                },
+                onDismiss = { activePresetSheet = null }
+            )
+        }
+
+        // Discover Placeholder Overlay
+        if (isDiscoverOpen) {
+            DiscoverPlaceholderOverlay(
+                onDismiss = { isDiscoverOpen = false }
+            )
+        }
+
+        // Slide-over Drawer (Theme Mode switcher + Kora reset + Crash Catcher test)
+        if (isDrawerOpen) {
+            StudioDrawerOverlay(
+                engine = engine,
+                onResetKora = {
+                    engine.resetToKora()
+                    activeDisplayGenre = null
+                    activeAudioGenre = null
+                    isDrawerOpen = false
+                },
+                onClose = { isDrawerOpen = false }
+            )
         }
     }
+}
 
-    LaunchedEffect(exoPlayer, isScrubbing) {
+// -----------------------------------------------------------------------------
+// Persistent Mini-Player Bar (Directly above Bottom Dock when audio is loaded)
+// -----------------------------------------------------------------------------
+
+@Composable
+private fun PersistentMiniPlayerBar(
+    engine: SynkaEngine,
+    onTapJumpToEq: () -> Unit
+) {
+    val colors = LocalSynkaColors.current
+    val bars = remember { FloatArray(SvaraAudio.WAVEFORM_BARS) }
+    var pulseTick by remember { mutableIntStateOf(0) }
+
+    LaunchedEffect(engine.svaraAudio, engine.isAudioPlaying) {
         while (true) {
-            if (!isScrubbing) {
-                val pos = exoPlayer.currentPosition
-                val dur = exoPlayer.duration
-                currentPositionMs = if (pos > 0L) pos else 0L
-                durationMs = if (dur > 0L) dur else 0L
-            }
-            delay(200L)
-        }
-    }
-
-    // Push Svara DSP parameters lock-free whenever preset, stress test, or bypass changes
-    LaunchedEffect(activeSvaraParams, bypassAudio) {
-        svaraAudio.updateParams(activeSvaraParams, bypassAudio)
-    }
-
-    // 30 fps lock-free 48-bar waveform sampler (decays smoothly when paused)
-    LaunchedEffect(svaraAudio, isPlaying) {
-        while (true) {
-            if (isPlaying) {
-                svaraAudio.readWaveform(waveformBars)
-                waveformFrameTick++
-                delay(33L)
+            if (engine.isAudioPlaying) {
+                engine.svaraAudio.readWaveform(bars)
+                pulseTick++
+                delay(36L)
             } else {
                 var anyActive = false
-                var i = 0
-                while (i < waveformBars.size) {
-                    val v = waveformBars[i] * 0.75f
-                    waveformBars[i] = if (v < 0.005f) 0f else v
-                    if (waveformBars[i] > 0f) anyActive = true
-                    i++
+                for (i in bars.indices) {
+                    val v = bars[i] * 0.72f
+                    bars[i] = if (v < 0.01f) 0f else v
+                    if (bars[i] > 0f) anyActive = true
                 }
                 if (anyActive) {
-                    waveformFrameTick++
-                    delay(33L)
+                    pulseTick++
+                    delay(36L)
                 } else {
-                    delay(120L)
+                    delay(140L)
                 }
             }
         }
     }
 
-    // Re-create RenderEffect and attach to active View on every parameter, mode, or view update
-    LaunchedEffect(activeArkaParams, bypassShader, mediaMode, photoUri, textureViewRef, imageViewRef) {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            val activeView = when (mediaMode) {
-                MediaMode.VIDEO -> textureViewRef
-                MediaMode.PHOTO -> imageViewRef
-                else -> null
-            }
-            val inactiveView = when (mediaMode) {
-                MediaMode.VIDEO -> imageViewRef
-                MediaMode.PHOTO -> textureViewRef
-                else -> null
-            }
+    Column(modifier = Modifier.fillMaxWidth()) {
+        HorizontalDivider(thickness = 1.dp, color = colors.hairline)
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .background(colors.surface)
+                .clickable(onClick = onTapJumpToEq)
+                .padding(horizontal = 14.dp, vertical = 9.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            // Live waveform pulse
+            Canvas(
+                modifier = Modifier
+                    .width(34.dp)
+                    .height(20.dp)
+            ) {
+                @Suppress("UNUSED_VARIABLE")
+                val tick = pulseTick
+                val count = 8
+                val step = (bars.size / count).coerceAtLeast(1)
+                val slot = size.width / count
+                val barW = (slot * 0.56f).coerceAtLeast(2f)
+                val midY = size.height * 0.5f
+                val pulseColor = if (engine.isMasterEnabled) colors.activeAccent else colors.secondaryText
 
-            Handler(Looper.getMainLooper()).post {
-                inactiveView?.let { ArkaShader.clearFromView(it) }
-                if (activeView != null) {
-                    ArkaShader.applyToView(
-                        targetView = activeView,
-                        params = activeArkaParams,
-                        bypass = bypassShader
+                for (i in 0 until count) {
+                    val mag = bars[(i * step).coerceAtMost(bars.lastIndex)].coerceIn(0f, 1f)
+                    val h = (mag * size.height).coerceAtLeast(3f)
+                    drawRoundRect(
+                        color = pulseColor,
+                        topLeft = Offset(i * slot + (slot - barW) * 0.5f, midY - h * 0.5f),
+                        size = Size(barW, h),
+                        cornerRadius = CornerRadius(barW * 0.5f, barW * 0.5f)
                     )
                 }
             }
+
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = engine.audioTitle.ifBlank { "Loaded Audio Track" },
+                    style = MaterialTheme.typography.bodySmall,
+                    fontWeight = FontWeight.SemiBold,
+                    color = colors.primaryText,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+                Text(
+                    text = "Tap to open Svara EQ",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = colors.secondaryText,
+                    maxLines = 1
+                )
+            }
+
+            Box(
+                modifier = Modifier
+                    .size(34.dp)
+                    .clip(CircleShape)
+                    .background(colors.elevatedSurface)
+                    .border(1.dp, colors.hairline, CircleShape)
+                    .clickable { engine.togglePlayPause() },
+                contentAlignment = Alignment.Center
+            ) {
+                PlayPauseIcon(
+                    isPlaying = engine.isAudioPlaying,
+                    color = colors.primaryText,
+                    modifier = Modifier.size(14.dp)
+                )
+            }
         }
     }
+}
+
+// -----------------------------------------------------------------------------
+// Persistent Bottom Dock: [Home]   [ Display EQ | EQ ]   [Local Media]
+// -----------------------------------------------------------------------------
+
+@Composable
+private fun PersistentBottomDock(
+    activeTab: SynkaTab,
+    onSelectTab: (SynkaTab) -> Unit
+) {
+    val colors = LocalSynkaColors.current
 
     Column(
         modifier = Modifier
-            .fillMaxSize()
-            .systemBarsPadding()
-            .padding(14.dp)
-            .verticalScroll(rememberScrollState()),
-        verticalArrangement = Arrangement.spacedBy(10.dp)
+            .fillMaxWidth()
+            .background(colors.background)
+            .navigationBarsPadding()
     ) {
+        HorizontalDivider(thickness = 1.dp, color = colors.hairline)
         Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Column {
-                Text(
-                    text = "Synka Studio • Svara DSP",
-                    fontSize = 20.sp,
-                    fontWeight = FontWeight.Bold,
-                    color = Color.White
-                )
-                Text(
-                    text = "API ${Build.VERSION.SDK_INT} (${Build.MODEL}) • Chunk 5 Gate",
-                    fontSize = 12.sp,
-                    fontFamily = FontFamily.Monospace,
-                    color = Color(0xFF9E9E9E)
-                )
-            }
-
-            Button(
-                onClick = {
-                    throw RuntimeException("Synka Test Gate 5: Simulated uncaught exception on API ${Build.VERSION.SDK_INT}")
-                },
-                colors = ButtonDefaults.buttonColors(
-                    containerColor = Color(0xFFCF6679),
-                    contentColor = Color.Black
-                ),
-                shape = RoundedCornerShape(8.dp)
-            ) {
-                Text("Simulate Crash", fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
-            }
-        }
-
-        // Media viewport container: FrameLayout with TextureView (video) + ImageView (photo)
-        Box(
             modifier = Modifier
                 .fillMaxWidth()
-                .height(200.dp)
-                .background(Color(0xFF0A0A0A), RoundedCornerShape(10.dp))
-                .border(1.dp, Color(0xFF2C2C2C), RoundedCornerShape(10.dp))
-        ) {
-            AndroidView(
-                modifier = Modifier.fillMaxSize(),
-                factory = { ctx ->
-                    FrameLayout(ctx).apply {
-                        layoutParams = ViewGroup.LayoutParams(
-                            ViewGroup.LayoutParams.MATCH_PARENT,
-                            ViewGroup.LayoutParams.MATCH_PARENT
-                        )
-
-                        val tv = TextureView(ctx).apply {
-                            layoutParams = FrameLayout.LayoutParams(
-                                FrameLayout.LayoutParams.MATCH_PARENT,
-                                FrameLayout.LayoutParams.MATCH_PARENT,
-                                Gravity.CENTER
-                            )
-                            visibility = android.view.View.GONE
-                        }
-
-                        val iv = ImageView(ctx).apply {
-                            layoutParams = FrameLayout.LayoutParams(
-                                FrameLayout.LayoutParams.MATCH_PARENT,
-                                FrameLayout.LayoutParams.MATCH_PARENT,
-                                Gravity.CENTER
-                            )
-                            scaleType = ImageView.ScaleType.FIT_CENTER
-                            visibility = android.view.View.GONE
-                        }
-
-                        addView(tv)
-                        addView(iv)
-
-                        textureViewRef = tv
-                        imageViewRef = iv
-                    }
-                },
-                onRelease = { container ->
-                    val tv = textureViewRef
-                    if (tv != null) {
-                        exoPlayer.clearVideoTextureView(tv)
-                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                            ArkaShader.clearFromView(tv)
-                        }
-                    }
-                    imageViewRef?.let { iv ->
-                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                            ArkaShader.clearFromView(iv)
-                        }
-                    }
-                    container.removeAllViews()
-                    textureViewRef = null
-                    imageViewRef = null
-                }
-            )
-
-            if (mediaMode == MediaMode.NONE || mediaMode == MediaMode.AUDIO) {
-                Text(
-                    text = if (mediaMode == MediaMode.AUDIO) "Audio Active: $mediaLabel" else "Pick Video, Photo, or Audio",
-                    color = Color(0xFFBDBDBD),
-                    fontSize = 13.sp,
-                    fontFamily = FontFamily.Monospace,
-                    modifier = Modifier
-                        .align(Alignment.Center)
-                        .padding(16.dp)
-                )
-            }
-        }
-
-        Text(
-            text = mediaLabel,
-            fontSize = 12.sp,
-            fontFamily = FontFamily.Monospace,
-            color = Color(0xFFD49A45),
-            maxLines = 1
-        )
-
-        // Pickers row
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(8.dp)
-        ) {
-            OutlinedButton(
-                onClick = { videoPicker.launch(arrayOf("video/*")) },
-                modifier = Modifier.weight(1f),
-                shape = RoundedCornerShape(8.dp)
-            ) {
-                Text("Video", fontSize = 13.sp)
-            }
-            OutlinedButton(
-                onClick = { photoPicker.launch(arrayOf("image/*")) },
-                modifier = Modifier.weight(1f),
-                shape = RoundedCornerShape(8.dp)
-            ) {
-                Text("Photo", fontSize = 13.sp)
-            }
-            OutlinedButton(
-                onClick = { audioPicker.launch(arrayOf("audio/*")) },
-                modifier = Modifier.weight(1f),
-                shape = RoundedCornerShape(8.dp)
-            ) {
-                Text("Audio", fontSize = 13.sp)
-            }
-        }
-
-        // Play / Pause + SeekBar
-        Row(
-            modifier = Modifier.fillMaxWidth(),
+                .padding(horizontal = 14.dp, vertical = 10.dp),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(10.dp)
         ) {
-            Button(
-                onClick = {
-                    if (exoPlayer.isPlaying) {
-                        exoPlayer.pause()
-                    } else {
-                        exoPlayer.play()
-                    }
-                },
-                shape = RoundedCornerShape(8.dp)
-            ) {
-                Text(if (isPlaying) "Pause" else "Play")
-            }
-
-            val safeDuration = durationMs.coerceAtLeast(1L).toFloat()
-            val sliderPos = currentPositionMs.coerceIn(0L, durationMs.coerceAtLeast(0L)).toFloat()
-
-            Slider(
-                value = sliderPos,
-                onValueChange = { newVal ->
-                    isScrubbing = true
-                    currentPositionMs = newVal.toLong()
-                },
-                onValueChangeFinished = {
-                    exoPlayer.seekTo(currentPositionMs)
-                    isScrubbing = false
-                },
-                valueRange = 0f..safeDuration,
-                modifier = Modifier.weight(1f)
-            )
-
-            Text(
-                text = formatMillis(currentPositionMs),
-                fontSize = 12.sp,
-                fontFamily = FontFamily.Monospace,
-                color = Color(0xFFB0B0B0)
-            )
-        }
-
-        // Svara DSP Verification Strip (Preset Chips + +12 dB Stress Test + Live 48-Bar Canvas)
-        Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .background(Color(0xFF181818), RoundedCornerShape(10.dp))
-                .border(1.dp, Color(0xFF2C2C2C), RoundedCornerShape(10.dp))
-                .padding(12.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp)
-        ) {
-            val dspStatus = String.format(
-                Locale.US,
-                "Svara DSP: %s • Pre %+.1fdB • Ar %.0f • Ni %.0f",
-                selectedAudioPreset.name,
-                activeSvaraParams.preAmpDb,
-                activeSvaraParams.antiCrackle,
-                activeSvaraParams.nightDialogue
-            )
-            Text(
-                text = dspStatus,
-                fontSize = 12.sp,
-                fontFamily = FontFamily.Monospace,
-                color = Color(0xFFD49A45)
-            )
-
-            Text(
-                text = "${svaraAudio.activeSampleRate} Hz • ${svaraAudio.activeEncodingLabel()} • ${svaraAudio.activeChannelCount}ch • 12-Stage TDF-II",
-                fontSize = 11.sp,
-                fontFamily = FontFamily.Monospace,
-                color = Color(0xFF9E9E9E)
-            )
-
-            // Live 48-bar Canvas waveform strip
+            // Left: Home Icon Button
+            val homeSelected = activeTab == SynkaTab.HOME
             Box(
                 modifier = Modifier
-                    .fillMaxWidth()
-                    .height(68.dp)
-                    .background(Color(0xFF0A0A0A), RoundedCornerShape(8.dp))
-                    .border(1.dp, Color(0xFF292929), RoundedCornerShape(8.dp))
-                    .padding(horizontal = 8.dp, vertical = 6.dp)
-            ) {
-                Canvas(modifier = Modifier.fillMaxSize()) {
-                    // Read frame tick inside draw scope so only Draw phase invalidates
-                    @Suppress("UNUSED_VARIABLE")
-                    val tick = waveformFrameTick
-
-                    val barCount = SvaraAudio.WAVEFORM_BARS
-                    val slotW = size.width / barCount
-                    val barW = (slotW * 0.68f).coerceAtLeast(2f)
-                    val gapX = (slotW - barW) * 0.5f
-                    val midY = size.height * 0.5f
-                    val corner = CornerRadius(barW * 0.5f, barW * 0.5f)
-
-                    // Subtle center baseline
-                    drawLine(
-                        color = Color(0xFF222222),
-                        start = Offset(0f, midY),
-                        end = Offset(size.width, midY),
-                        strokeWidth = 1f
+                    .size(44.dp)
+                    .clip(RoundedCornerShape(14.dp))
+                    .background(if (homeSelected) colors.elevatedSurface else colors.surface)
+                    .border(
+                        width = if (homeSelected) 1.4.dp else 1.dp,
+                        color = if (homeSelected) colors.activeAccent else colors.hairline,
+                        shape = RoundedCornerShape(14.dp)
                     )
-
-                    var i = 0
-                    while (i < barCount) {
-                        val mag = waveformBars[i].coerceIn(0f, 1f)
-                        val barH = (mag * size.height).coerceAtLeast(3f)
-                        val left = i * slotW + gapX
-                        val top = midY - barH * 0.5f
-                        val barColor = when {
-                            bypassAudio -> Color(0xFF6B6B6B)
-                            mag > 0.88f -> Color(0xFFCF6679)
-                            stressTest12Db -> Color(0xFFE6B45E)
-                            else -> Color(0xFFD49A45)
-                        }
-                        drawRoundRect(
-                            color = barColor,
-                            topLeft = Offset(left, top),
-                            size = Size(barW, barH),
-                            cornerRadius = corner
-                        )
-                        i++
-                    }
-                }
+                    .clickable { onSelectTab(SynkaTab.HOME) },
+                contentAlignment = Alignment.Center
+            ) {
+                HomeHouseIcon(
+                    color = if (homeSelected) colors.activeAccentStrong else colors.secondaryText,
+                    modifier = Modifier.size(20.dp)
+                )
             }
 
-            // Audio preset test chips: Flat, Bass, Vocal, Late Night
+            // Center: Merged Split Pill [ Display EQ | EQ ]
+            val splitShape = RoundedCornerShape(50)
+            val displaySelected = activeTab == SynkaTab.DISPLAY_EQ
+            val audioSelected = activeTab == SynkaTab.AUDIO_EQ
+
             Row(
                 modifier = Modifier
-                    .fillMaxWidth()
-                    .horizontalScroll(rememberScrollState()),
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                quickAudioPresets.forEach { item ->
-                    val isSelected = selectedAudioPreset.id == item.preset.id
-                    FilterChip(
-                        selected = isSelected,
-                        onClick = { selectedAudioPreset = item.preset },
-                        label = {
-                            Text(
-                                text = item.chipLabel,
-                                fontSize = 12.sp,
-                                fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal
-                            )
-                        },
-                        colors = FilterChipDefaults.filterChipColors(
-                            selectedContainerColor = Color(0xFFD49A45),
-                            selectedLabelColor = Color(0xFF121212),
-                            containerColor = Color(0xFF1E1E1E),
-                            labelColor = Color(0xFFE3E3E3)
-                        )
-                    )
-                }
-            }
-
-            // +12 dB Stress Test button + Audio Bypass toggle
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(10.dp),
+                    .weight(1f)
+                    .height(44.dp)
+                    .clip(splitShape)
+                    .background(colors.surface)
+                    .border(
+                        width = 1.dp,
+                        color = if (displaySelected || audioSelected) colors.activeAccent.copy(alpha = 0.7f) else colors.hairline,
+                        shape = splitShape
+                    ),
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Button(
-                    onClick = { stressTest12Db = !stressTest12Db },
-                    modifier = Modifier.weight(1f),
-                    colors = ButtonDefaults.buttonColors(
-                        containerColor = if (stressTest12Db) Color(0xFFCF6679) else Color(0xFF2A2A2A),
-                        contentColor = if (stressTest12Db) Color.Black else Color(0xFFE3E3E3)
-                    ),
-                    shape = RoundedCornerShape(8.dp)
+                Box(
+                    modifier = Modifier
+                        .weight(1.25f)
+                        .fillMaxHeight()
+                        .background(if (displaySelected) colors.activeAccent else Color.Transparent)
+                        .clickable { onSelectTab(SynkaTab.DISPLAY_EQ) },
+                    contentAlignment = Alignment.Center
                 ) {
                     Text(
-                        text = if (stressTest12Db) "+12 dB Stress: ON" else "+12 dB Stress Test",
-                        fontSize = 12.sp,
-                        fontWeight = FontWeight.SemiBold
+                        text = "Display EQ",
+                        style = MaterialTheme.typography.labelMedium,
+                        fontWeight = if (displaySelected) FontWeight.Bold else FontWeight.Medium,
+                        color = if (displaySelected) SynkaPalette.ObsidianCharcoal else colors.primaryText,
+                        maxLines = 1
                     )
                 }
 
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                Box(
+                    modifier = Modifier
+                        .width(1.dp)
+                        .height(22.dp)
+                        .background(colors.hairline)
+                )
+
+                Box(
+                    modifier = Modifier
+                        .weight(0.85f)
+                        .fillMaxHeight()
+                        .background(if (audioSelected) colors.activeAccent else Color.Transparent)
+                        .clickable { onSelectTab(SynkaTab.AUDIO_EQ) },
+                    contentAlignment = Alignment.Center
                 ) {
                     Text(
-                        text = "Bypass DSP",
-                        fontSize = 12.sp,
-                        color = Color(0xFFBDBDBD)
-                    )
-                    Switch(
-                        checked = bypassAudio,
-                        onCheckedChange = { bypassAudio = it }
+                        text = "EQ",
+                        style = MaterialTheme.typography.labelMedium,
+                        fontWeight = if (audioSelected) FontWeight.Bold else FontWeight.Medium,
+                        color = if (audioSelected) SynkaPalette.ObsidianCharcoal else colors.primaryText,
+                        maxLines = 1
                     )
                 }
             }
-        }
 
-        // Quick-tap Arka Preset Test Bar
-        Column(
-            modifier = Modifier.fillMaxWidth(),
-            verticalArrangement = Arrangement.spacedBy(6.dp)
-        ) {
-            val soloLabels = ColorBand.entries
-                .filterIndexed { idx, _ -> activeArkaParams.bands[idx].solo }
-                .joinToString(",") { it.shortLabel }
-            val soloSuffix = if (soloLabels.isNotEmpty()) " • SOLO: $soloLabels" else ""
-
-            Text(
-                text = "Arka Grade: ${selectedArkaPreset.name}$soloSuffix",
-                fontSize = 13.sp,
-                fontFamily = FontFamily.Monospace,
-                color = Color(0xFFE3E3E3)
-            )
-
+            // Right: Local Media Button
+            val mediaSelected = activeTab == SynkaTab.LOCAL_MEDIA
             Row(
                 modifier = Modifier
-                    .fillMaxWidth()
-                    .horizontalScroll(rememberScrollState()),
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                quickArkaPresets.forEach { item ->
-                    val isSelected = selectedArkaPreset.id == item.preset.id
-                    FilterChip(
-                        selected = isSelected,
-                        onClick = {
-                            selectedArkaPreset = item.preset
-                            subzeroDimmer = item.preset.arka.subzeroDimmer
-                        },
-                        label = {
-                            Text(
-                                text = item.chipLabel,
-                                fontSize = 12.sp,
-                                fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal
-                            )
-                        },
-                        colors = FilterChipDefaults.filterChipColors(
-                            selectedContainerColor = Color(0xFFD49A45),
-                            selectedLabelColor = Color(0xFF121212),
-                            containerColor = Color(0xFF1E1E1E),
-                            labelColor = Color(0xFFE3E3E3)
-                        )
+                    .height(44.dp)
+                    .clip(RoundedCornerShape(14.dp))
+                    .background(if (mediaSelected) colors.elevatedSurface else colors.surface)
+                    .border(
+                        width = if (mediaSelected) 1.4.dp else 1.dp,
+                        color = if (mediaSelected) colors.activeAccent else colors.hairline,
+                        shape = RoundedCornerShape(14.dp)
                     )
-                }
+                    .clickable { onSelectTab(SynkaTab.LOCAL_MEDIA) }
+                    .padding(horizontal = 12.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                LocalMediaIcon(
+                    color = if (mediaSelected) colors.activeAccentStrong else colors.secondaryText,
+                    modifier = Modifier.size(16.dp)
+                )
+                Text(
+                    text = "Local\nMedia",
+                    style = MaterialTheme.typography.labelSmall,
+                    lineHeight = 11.sp,
+                    fontWeight = if (mediaSelected) FontWeight.Bold else FontWeight.Medium,
+                    color = if (mediaSelected) colors.activeAccentStrong else colors.primaryText
+                )
             }
-        }
-
-        // Subzero Dimmer Test Slider (0 .. 100%)
-        Column(modifier = Modifier.fillMaxWidth()) {
-            Text(
-                text = String.format(Locale.US, "Subzero Dimmer: %.0f%%", subzeroDimmer),
-                fontSize = 13.sp,
-                fontFamily = FontFamily.Monospace,
-                color = Color(0xFFE3E3E3)
-            )
-            Slider(
-                value = subzeroDimmer,
-                onValueChange = { subzeroDimmer = it },
-                valueRange = 0f..100f
-            )
-        }
-
-        // Bypass Shader Toggle
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .background(Color(0xFF1E1E1E), RoundedCornerShape(8.dp))
-                .padding(horizontal = 14.dp, vertical = 8.dp),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Text(
-                text = "Bypass Shader",
-                fontSize = 14.sp,
-                fontWeight = FontWeight.Medium,
-                color = Color(0xFFE3E3E3)
-            )
-            Switch(
-                checked = bypassShader,
-                onCheckedChange = { bypassShader = it }
-            )
         }
     }
 }
 
-private fun formatMillis(ms: Long): String {
-    val totalSec = (ms / 1000L).coerceAtLeast(0L)
-    val mins = totalSec / 60L
-    val secs = totalSec % 60L
-    return String.format(Locale.US, "%02d:%02d", mins, secs)
+// -----------------------------------------------------------------------------
+// Placeholder Boxes for Chunks 8–13 (Display EQ, EQ, Local Media, PresetSheet)
+// -----------------------------------------------------------------------------
+
+@Composable
+private fun PlaceholderWorkspaceBox(
+    title: String,
+    subtitle: String,
+    statusLine: String,
+    actionLabel: String,
+    onAction: () -> Unit
+) {
+    val colors = LocalSynkaColors.current
+
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(20.dp),
+        contentAlignment = Alignment.Center
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(18.dp))
+                .background(colors.surface)
+                .border(1.dp, colors.hairline, RoundedCornerShape(18.dp))
+                .padding(20.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            Text(
+                text = title,
+                style = MaterialTheme.typography.headlineSmall,
+                color = colors.primaryText
+            )
+            Text(
+                text = subtitle,
+                style = MaterialTheme.typography.bodySmall,
+                color = colors.secondaryText
+            )
+            Text(
+                text = statusLine,
+                style = MaterialTheme.typography.labelMedium,
+                color = colors.activeAccent
+            )
+            Spacer(modifier = Modifier.height(4.dp))
+            Box(
+                modifier = Modifier
+                    .clip(RoundedCornerShape(50))
+                    .background(colors.elevatedSurface)
+                    .border(1.dp, colors.hairline, RoundedCornerShape(50))
+                    .clickable(onClick = onAction)
+                    .padding(horizontal = 16.dp, vertical = 8.dp)
+            ) {
+                Text(
+                    text = actionLabel,
+                    style = MaterialTheme.typography.labelMedium,
+                    color = colors.primaryText
+                )
+            }
+        }
+    }
 }
+
+@Composable
+private fun LocalMediaPlaceholderBox(
+    engine: SynkaEngine,
+    onPickVisual: () -> Unit,
+    onPickAudio: () -> Unit,
+    onJumpHome: () -> Unit
+) {
+    val colors = LocalSynkaColors.current
+
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(20.dp),
+        contentAlignment = Alignment.Center
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(18.dp))
+                .background(colors.surface)
+                .border(1.dp, colors.hairline, RoundedCornerShape(18.dp))
+                .padding(20.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            Text(
+                text = "Local Media",
+                style = MaterialTheme.typography.headlineSmall,
+                color = colors.primaryText
+            )
+            Text(
+                text = "Placeholder for Chunk 11 • Media Library & Per-File Preset Bindings. Use the quick pickers below to test live Home preview and the persistent Mini-Player now.",
+                style = MaterialTheme.typography.bodySmall,
+                color = colors.secondaryText
+            )
+            Text(
+                text = "Visual: ${engine.visualUri?.lastPathSegment ?: "Built-in Calibration Chart"}",
+                style = MaterialTheme.typography.labelSmall,
+                color = colors.activeAccent,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+            Text(
+                text = "Audio: ${engine.audioTitle.ifBlank { "None loaded" }}",
+                style = MaterialTheme.typography.labelSmall,
+                color = colors.secondaryText,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                Box(
+                    modifier = Modifier
+                        .weight(1f)
+                        .clip(RoundedCornerShape(12.dp))
+                        .background(colors.elevatedSurface)
+                        .border(1.dp, colors.hairline, RoundedCornerShape(12.dp))
+                        .clickable {
+                            onPickVisual()
+                            onJumpHome()
+                        }
+                        .padding(vertical = 11.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(
+                        text = "Pick Photo / Video",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = colors.primaryText
+                    )
+                }
+
+                Box(
+                    modifier = Modifier
+                        .weight(1f)
+                        .clip(RoundedCornerShape(12.dp))
+                        .background(colors.elevatedSurface)
+                        .border(1.dp, colors.hairline, RoundedCornerShape(12.dp))
+                        .clickable(onClick = onPickAudio)
+                        .padding(vertical = 11.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(
+                        text = "Pick Audio",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = colors.primaryText
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun PresetSheetPlaceholderOverlay(
+    request: PresetSheetRequest,
+    engine: SynkaEngine,
+    onSelectPreset: (SynkaPreset) -> Unit,
+    onDismiss: () -> Unit
+) {
+    val colors = LocalSynkaColors.current
+    val matchingPresets = remember(request, engine.userPresets, engine.favoriteIds) {
+        val all = engine.allPresets()
+        when (request.domain) {
+            PresetDomain.DISPLAY -> {
+                val target = DisplayGenre.entries.firstOrNull { it.name == request.genre }
+                all.filter { it.displayGenre == target && it.id != SynkaBuiltInPresets.KORA.id }
+            }
+            PresetDomain.AUDIO -> {
+                val target = AudioGenre.entries.firstOrNull { it.name == request.genre }
+                all.filter { it.audioGenre == target && it.id != SynkaBuiltInPresets.KORA.id }
+            }
+            PresetDomain.BOTH -> all
+        }
+    }
+
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(Color.Black.copy(alpha = 0.58f))
+            .clickable(onClick = onDismiss),
+        contentAlignment = Alignment.BottomCenter
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(topStart = 22.dp, topEnd = 22.dp))
+                .background(colors.surface)
+                .border(1.dp, colors.hairline, RoundedCornerShape(topStart = 22.dp, topEnd = 22.dp))
+                .clickable(enabled = false, onClick = {})
+                .navigationBarsPadding()
+                .padding(horizontal = 18.dp, vertical = 16.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            Box(
+                modifier = Modifier
+                    .align(Alignment.CenterHorizontally)
+                    .width(38.dp)
+                    .height(4.dp)
+                    .clip(RoundedCornerShape(50))
+                    .background(colors.hairline)
+            )
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column {
+                    Text(
+                        text = "${request.domain.name} • ${request.genre.replace('_', ' ')}",
+                        style = MaterialTheme.typography.titleMedium,
+                        color = colors.primaryText
+                    )
+                    Text(
+                        text = "PresetSheet Placeholder (Chunks 12–13) • both link: ${if (engine.isLinkedBoth) "ON" else "OFF"}",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = colors.secondaryText
+                    )
+                }
+
+                Box(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(50))
+                        .background(colors.elevatedSurface)
+                        .clickable(onClick = onDismiss)
+                        .padding(horizontal = 12.dp, vertical = 6.dp)
+                ) {
+                    Text(
+                        text = "Done",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = colors.primaryText
+                    )
+                }
+            }
+
+            matchingPresets.forEach { preset ->
+                val isSelected = engine.activePresetId == preset.id
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(12.dp))
+                        .background(if (isSelected) colors.elevatedSurface else colors.background)
+                        .border(
+                            width = if (isSelected) 1.4.dp else 1.dp,
+                            color = if (isSelected) colors.activeAccent else colors.hairline,
+                            shape = RoundedCornerShape(12.dp)
+                        )
+                        .clickable { onSelectPreset(preset) }
+                        .padding(horizontal = 14.dp, vertical = 11.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = preset.name,
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = if (isSelected) colors.activeAccentStrong else colors.primaryText
+                    )
+                    Text(
+                        text = preset.domain.name,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = if (isSelected) colors.activeAccent else colors.secondaryText
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun DiscoverPlaceholderOverlay(onDismiss: () -> Unit) {
+    val colors = LocalSynkaColors.current
+
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(Color.Black.copy(alpha = 0.58f))
+            .clickable(onClick = onDismiss),
+        contentAlignment = Alignment.Center
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 24.dp)
+                .clip(RoundedCornerShape(18.dp))
+                .background(colors.surface)
+                .border(1.dp, colors.hairline, RoundedCornerShape(18.dp))
+                .clickable(enabled = false, onClick = {})
+                .padding(20.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            Text(
+                text = "Discover Presets",
+                style = MaterialTheme.typography.headlineSmall,
+                color = colors.primaryText
+            )
+            Text(
+                text = "Search across built-in presets, favorites, and custom studio looks arrives in Chunks 12–13.",
+                style = MaterialTheme.typography.bodySmall,
+                color = colors.secondaryText
+            )
+            Box(
+                modifier = Modifier
+                    .align(Alignment.End)
+                    .clip(RoundedCornerShape(50))
+                    .background(colors.activeAccent)
+                    .clickable(onClick = onDismiss)
+                    .padding(horizontal = 16.dp, vertical = 8.dp)
+            ) {
+                Text(
+                    text = "Close",
+                    style = MaterialTheme.typography.labelMedium,
+                    fontWeight = FontWeight.Bold,
+                    color = SynkaPalette.ObsidianCharcoal
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun StudioDrawerOverlay(
+    engine: SynkaEngine,
+    onResetKora: () -> Unit,
+    onClose: () -> Unit
+) {
+    val colors = LocalSynkaColors.current
+
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(Color.Black.copy(alpha = 0.58f))
+            .clickable(onClick = onClose),
+        contentAlignment = Alignment.CenterEnd
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxHeight()
+                .width(280.dp)
+                .background(colors.surface)
+                .border(1.dp, colors.hairline)
+                .clickable(enabled = false, onClick = {})
+                .systemBarsPadding()
+                .padding(18.dp),
+            verticalArrangement = Arrangement.spacedBy(14.dp)
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = "Synka Studio",
+                    style = MaterialTheme.typography.headlineSmall,
+                    color = colors.primaryText
+                )
+                Text(
+                    text = "CLOSE",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = colors.secondaryText,
+                    modifier = Modifier.clickable(onClick = onClose)
+                )
+            }
+
+            HorizontalDivider(thickness = 1.dp, color = colors.hairline)
+
+            Text(
+                text = "APPEARANCE",
+                style = MaterialTheme.typography.labelSmall,
+                color = colors.secondaryText
+            )
+
+            val isArtisan = engine.themeMode == SynkaThemeMode.ARTISAN_EDITION
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                DrawerModeOption(
+                    title = "Studio Reference",
+                    subtitle = "Neutral steel accents, zero watermarks",
+                    selected = !isArtisan,
+                    onClick = { engine.setThemeMode(SynkaThemeMode.STUDIO_REFERENCE) }
+                )
+                DrawerModeOption(
+                    title = "Artisan Edition",
+                    subtitle = "Kansa Bronze + 5% Yantra banner linework",
+                    selected = isArtisan,
+                    onClick = { engine.setThemeMode(SynkaThemeMode.ARTISAN_EDITION) }
+                )
+            }
+
+            HorizontalDivider(thickness = 1.dp, color = colors.hairline)
+
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(12.dp))
+                    .background(colors.elevatedSurface)
+                    .border(1.dp, colors.hairline, RoundedCornerShape(12.dp))
+                    .clickable(onClick = onResetKora)
+                    .padding(horizontal = 14.dp, vertical = 11.dp)
+            ) {
+                Text(
+                    text = "Reset All to Kora (Neutral)",
+                    style = MaterialTheme.typography.bodySmall,
+                    fontWeight = FontWeight.Medium,
+                    color = colors.primaryText
+                )
+            }
+
+            Spacer(modifier = Modifier.weight(1f))
+
+            Text(
+                text = "v1 Sandbox • API ${Build.VERSION.SDK_INT} (${Build.MODEL})",
+                style = MaterialTheme.typography.labelSmall,
+                color = colors.secondaryText
+            )
+
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(10.dp))
+                    .background(SynkaPalette.SindoorCrimson.copy(alpha = 0.16f))
+                    .border(1.dp, SynkaPalette.SindoorCrimson.copy(alpha = 0.5f), RoundedCornerShape(10.dp))
+                    .clickable {
+                        throw RuntimeException("Synka Test Gate 7: Simulated uncaught exception")
+                    }
+                    .padding(horizontal = 12.dp, vertical = 9.dp),
+                contentAlignment = Alignment.Center
+            ) {
+                Text(
+                    text = "Test Crash Catcher",
+                    style = MaterialTheme.typography.labelSmall,
+                    fontWeight = FontWeight.SemiBold,
+                    color = SynkaPalette.SindoorCrimson
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun DrawerModeOption(
+    title: String,
+    subtitle: String,
+    selected: Boolean,
+    onClick: () -> Unit
+) {
+    val colors = LocalSynkaColors.current
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(12.dp))
+            .background(if (selected) colors.elevatedSurface else colors.background)
+            .border(
+                width = if (selected) 1.4.dp else 1.dp,
+                color = if (selected) colors.activeAccent else colors.hairline,
+                shape = RoundedCornerShape(12.dp)
+            )
+            .clickable(onClick = onClick)
+            .padding(12.dp),
+        verticalArrangement = Arrangement.spacedBy(2.dp)
+    ) {
+        Text(
+            text = title,
+            style = MaterialTheme.typography.bodySmall,
+            fontWeight = FontWeight.SemiBold,
+            color = if (selected) colors.activeAccentStrong else colors.primaryText
+        )
+        Text(
+            text = subtitle,
+            style = MaterialTheme.typography.labelSmall,
+            color = colors.secondaryText
+        )
+    }
+}
+
+// -----------------------------------------------------------------------------
+// Bottom Dock Vector Icons
+// -----------------------------------------------------------------------------
+
+@Composable
+private fun HomeHouseIcon(color: Color, modifier: Modifier = Modifier) {
+    Canvas(modifier = modifier) {
+        val w = size.width
+        val h = size.height
+        val stroke = Stroke(width = 1.7.dp.toPx(), cap = StrokeCap.Round, join = StrokeJoin.Round)
+        val roofAndWalls = Path().apply {
+            moveTo(w * 0.12f, h * 0.46f)
+            lineTo(w * 0.50f, h * 0.14f)
+            lineTo(w * 0.88f, h * 0.46f)
+            moveTo(w * 0.22f, h * 0.44f)
+            lineTo(w * 0.22f, h * 0.86f)
+            lineTo(w * 0.78f, h * 0.86f)
+            lineTo(w * 0.78f, h * 0.44f)
+        }
+        drawPath(path = roofAndWalls, color = color, style = stroke)
+    }
+}
+
+@Composable
+private fun LocalMediaIcon(color: Color, modifier: Modifier = Modifier) {
+    Canvas(modifier = modifier) {
+        val w = size.width
+        val h = size.height
+        val stroke = Stroke(width = 1.6.dp.toPx(), cap = StrokeCap.Round, join = StrokeJoin.Round)
+        val folder = Path().apply {
+            moveTo(w * 0.10f, h * 0.24f)
+            lineTo(w * 0.42f, h * 0.24f)
+            lineTo(w * 0.52f, h * 0.36f)
+            lineTo(w * 0.90f, h * 0.36f)
+            lineTo(w * 0.90f, h * 0.82f)
+            lineTo(w * 0.10f, h * 0.82f)
+            close()
+        }
+        drawPath(path = folder, color = color, style = stroke)
+    }
+}
+
+// -----------------------------------------------------------------------------
+// Preserved Chunk 1 Crash Catcher Screen
+// -----------------------------------------------------------------------------
 
 @Composable
 private fun CrashCatcherScreen(
@@ -898,7 +1183,7 @@ private fun CrashCatcherScreen(
             text = "Synka Crash Catcher",
             fontSize = 22.sp,
             fontWeight = FontWeight.Bold,
-            color = Color(0xFFCF6679)
+            color = SynkaPalette.SindoorCrimson
         )
 
         Spacer(modifier = Modifier.height(4.dp))
@@ -906,7 +1191,7 @@ private fun CrashCatcherScreen(
         Text(
             text = "Uncaught exception captured and persisted to disk.",
             fontSize = 13.sp,
-            color = Color(0xFFB0B0B0)
+            color = SynkaPalette.MutedSilver
         )
 
         Spacer(modifier = Modifier.height(12.dp))
