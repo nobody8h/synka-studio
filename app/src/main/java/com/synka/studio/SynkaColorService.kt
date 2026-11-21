@@ -18,6 +18,7 @@ import android.view.accessibility.AccessibilityEvent
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
+import androidx.core.content.ContextCompat
 import org.json.JSONObject
 import kotlin.math.abs
 import kotlin.math.roundToInt
@@ -58,7 +59,8 @@ class SynkaColorService : AccessibilityService() {
         private var latestMasterEnabled: Boolean = true
 
         fun refreshPermissions(context: Context) {
-            hasSecureSettingsGrant = context.checkSelfPermission(
+            hasSecureSettingsGrant = ContextCompat.checkSelfPermission(
+                context,
                 Manifest.permission.WRITE_SECURE_SETTINGS
             ) == PackageManager.PERMISSION_GRANTED
         }
@@ -96,13 +98,12 @@ class SynkaColorService : AccessibilityService() {
             }
         }
 
-        // Built-in banking, UPI, wallet, and Android system security packages to auto-cloak
         private val CLOAK_EXACT_PACKAGES = setOf(
-            "com.google.android.apps.nbu.paisa.user", // Google Pay
+            "com.google.android.apps.nbu.paisa.user",
             "com.phonepe.app",
             "net.one97.paytm",
-            "in.org.npci.upiapp",                    // BHIM
-            "com.dreamplug.androidapp",              // CRED
+            "in.org.npci.upiapp",
+            "com.dreamplug.androidapp",
             "com.amazon.mShop.android.shopping",
             "com.paypal.android.p2pmobile",
             "com.android.permissioncontroller",
@@ -144,7 +145,6 @@ class SynkaColorService : AccessibilityService() {
         loadPersistedState()
         refreshPermissions(this)
 
-        // Auto-arm if user just returned from Accessibility settings after tapping enable
         if (!isSystemColorEnabled) {
             setEnabled(this, true)
         } else {
@@ -156,11 +156,8 @@ class SynkaColorService : AccessibilityService() {
         if (event == null) return
         if (event.eventType != AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) return
         val pkg = event.packageName?.toString()?.trim().orEmpty()
-        if (pkg.isEmpty() |
-
-| pkg == currentForegroundPackage) return
-
-        // Ignore transient SystemUI volume/shade updates unless switching into actual app/installer
+        if (pkg.isEmpty()) return
+        if (pkg == currentForegroundPackage) return
         if (pkg == "com.android.systemui") return
 
         currentForegroundPackage = pkg
@@ -210,10 +207,14 @@ class SynkaColorService : AccessibilityService() {
         val pkg = currentForegroundPackage
         val cloakHit = resolveCloakReason(pkg)
 
-        if (!isSystemColorEnabled |
+        val shouldSuppress = when {
+            !isSystemColorEnabled -> true
+            !latestMasterEnabled -> true
+            cloakHit != null -> true
+            else -> false
+        }
 
-| !latestMasterEnabled |
-| cloakHit != null) {
+        if (shouldSuppress) {
             detachOverlaySafely()
             restoreDaltonizerIfNeeded()
             isCloaked = cloakHit != null && isSystemColorEnabled && latestMasterEnabled
@@ -234,7 +235,6 @@ class SynkaColorService : AccessibilityService() {
         val tintArgb = computeTintOverlayArgb(params)
         val dimAlphaInt = computeDimmerAlphaInt(params)
 
-        // Optional true hardware Monochrome via WRITE_SECURE_SETTINGS if user granted it
         val wantsMono = isMonochromeGrade(params)
         if (wantsMono && hasSecureSettingsGrant) {
             applyMonochromeDaltonizer(true)
@@ -242,9 +242,7 @@ class SynkaColorService : AccessibilityService() {
             restoreDaltonizerIfNeeded()
         }
 
-        val hasVisibleOverlay = Color.alpha(tintArgb) > 0 |
-
-| dimAlphaInt > 0
+        val hasVisibleOverlay = if (Color.alpha(tintArgb) > 0) true else dimAlphaInt > 0
         if (hasVisibleOverlay) {
             ensureOverlayAttached()
             overlayView?.updateColors(tintArgb, dimAlphaInt)
@@ -264,9 +262,9 @@ class SynkaColorService : AccessibilityService() {
         if (pkg.isBlank()) return null
         if (pkg == packageName) return "Synka Preview"
         if (CLOAK_EXACT_PACKAGES.contains(pkg)) {
-            return if (pkg.contains("permission") |
-
-| pkg.contains("installer")) {
+            return if (pkg.contains("permission")) {
+                "System Dialog"
+            } else if (pkg.contains("installer")) {
                 "System Dialog"
             } else {
                 "Banking / Protected"
@@ -276,12 +274,9 @@ class SynkaColorService : AccessibilityService() {
             return "Banking App"
         }
         val lower = pkg.lowercase()
-        if (lower.contains("bank") |
-
-| lower.contains("upi") |
-| lower.contains("wallet")) {
-            return "Banking App"
-        }
+        if (lower.contains("bank")) return "Banking App"
+        if (lower.contains("upi")) return "Banking App"
+        if (lower.contains("wallet")) return "Banking App"
         return null
     }
 
@@ -301,9 +296,12 @@ class SynkaColorService : AccessibilityService() {
             PixelFormat.TRANSLUCENT
         ).apply {
             gravity = Gravity.TOP or Gravity.START
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
                 layoutInDisplayCutoutMode =
                     WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS
+            } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                layoutInDisplayCutoutMode =
+                    WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
             }
         }
 
@@ -344,11 +342,8 @@ class SynkaColorService : AccessibilityService() {
     }
 
     private fun isMonochromeGrade(params: ArkaParams): Boolean {
-        val anySolo = params.bands.any { it.solo }
-        if (anySolo) return false
-        return params.bands.all { it.mute |
-
-| it.sat <= -92f }
+        if (params.bands.any { it.solo }) return false
+        return params.bands.all { if (it.mute) true else it.sat <= -92f }
     }
 
     private fun computeDimmerAlphaInt(params: ArkaParams): Int {
@@ -365,7 +360,6 @@ class SynkaColorService : AccessibilityService() {
         val trimG = (params.trimG / 50f).coerceIn(-1f, 1f)
         val trimB = (params.trimB / 50f).coerceIn(-1f, 1f)
 
-        // Include gentle contribution from shadow/highlight tint globes so Cinema presets tint cleanly
         val globeWarm = ((params.shadowTintX + params.highlightTintX) * 0.25f).coerceIn(-0.5f, 0.5f)
         val globeTint = ((params.shadowTintY + params.highlightTintY) * 0.25f).coerceIn(-0.5f, 0.5f)
 
@@ -441,9 +435,8 @@ class SynkaColorService : AccessibilityService() {
         }
 
         fun updateColors(newTint: Int, newDimAlpha: Int) {
-            if (tintColor != newTint |
-
-| dimAlpha != newDimAlpha) {
+            val changed = if (tintColor != newTint) true else dimAlpha != newDimAlpha
+            if (changed) {
                 tintColor = newTint
                 dimAlpha = newDimAlpha
                 invalidate()
