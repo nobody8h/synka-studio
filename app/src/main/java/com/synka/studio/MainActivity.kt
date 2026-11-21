@@ -371,12 +371,22 @@ private fun SynkaAppShell(engine: SynkaEngine) {
                         )
                     }
                     SynkaTab.AUDIO_EQ -> {
-                        PlaceholderWorkspaceBox(
-                            title = "Audio EQ (Svara Studio)",
-                            subtitle = "Placeholder for Chunk 11 • 10-Band Parametric EQ, 5-Zone Sound Contour, Dual Globes, and Anti-Crackle Limiter.",
-                            statusLine = "DSP: ${engine.svaraAudio.activeSampleRate} Hz • ${engine.svaraAudio.activeEncodingLabel()} • Pre ${String.format(java.util.Locale.US, "%+.1f", engine.activeSvara.preAmpDb)} dB",
-                            actionLabel = "Back to Home",
-                            onAction = { activeTab = SynkaTab.HOME }
+                        SvaraStudio(
+                            engine = engine,
+                            activeAudioGenre = activeAudioGenre,
+                            onEditAudioMedia = {
+                                audioMediaPicker.launch(arrayOf("audio/*"))
+                            },
+                            onResetAudioToFlat = {
+                                engine.applyPreset(SynkaBuiltInPresets.AUDIO_STUDIO_FLAT)
+                                activeAudioGenre = AudioGenre.FLAT
+                            },
+                            onPresetSaved = { saved ->
+                                saved.audioGenre?.let { genre ->
+                                    activeAudioGenre = genre
+                                    lastUsedPresetByGenre["${PresetDomain.AUDIO.name}:${genre.name}"] = saved.id
+                                }
+                            }
                         )
                     }
                     SynkaTab.LOCAL_MEDIA -> {
@@ -390,7 +400,7 @@ private fun SynkaAppShell(engine: SynkaEngine) {
                 }
             }
 
-            if (isAudioLoaded) {
+            if (isAudioLoaded && activeTab != SynkaTab.AUDIO_EQ) {
                 PersistentMiniPlayerBar(
                     engine = engine,
                     onTapJumpToEq = { activeTab = SynkaTab.AUDIO_EQ }
@@ -734,67 +744,8 @@ private fun PersistentBottomDock(
 }
 
 // -----------------------------------------------------------------------------
-// Placeholder Boxes for Chunks 11–13
+// Placeholder Boxes for Chunks 12–13
 // -----------------------------------------------------------------------------
-
-@Composable
-private fun PlaceholderWorkspaceBox(
-    title: String,
-    subtitle: String,
-    statusLine: String,
-    actionLabel: String,
-    onAction: () -> Unit
-) {
-    val colors = LocalSynkaColors.current
-
-    Box(
-        modifier = Modifier
-            .fillMaxSize()
-            .padding(20.dp),
-        contentAlignment = Alignment.Center
-    ) {
-        Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .clip(RoundedCornerShape(18.dp))
-                .background(colors.surface)
-                .border(1.dp, colors.hairline, RoundedCornerShape(18.dp))
-                .padding(20.dp),
-            verticalArrangement = Arrangement.spacedBy(10.dp)
-        ) {
-            Text(
-                text = title,
-                style = MaterialTheme.typography.headlineSmall,
-                color = colors.primaryText
-            )
-            Text(
-                text = subtitle,
-                style = MaterialTheme.typography.bodySmall,
-                color = colors.secondaryText
-            )
-            Text(
-                text = statusLine,
-                style = MaterialTheme.typography.labelMedium,
-                color = colors.activeAccent
-            )
-            Spacer(modifier = Modifier.height(4.dp))
-            Box(
-                modifier = Modifier
-                    .clip(RoundedCornerShape(50))
-                    .background(colors.elevatedSurface)
-                    .border(1.dp, colors.hairline, RoundedCornerShape(50))
-                    .clickable(onClick = onAction)
-                    .padding(horizontal = 16.dp, vertical = 8.dp)
-            ) {
-                Text(
-                    text = actionLabel,
-                    style = MaterialTheme.typography.labelMedium,
-                    color = colors.primaryText
-                )
-            }
-        }
-    }
-}
 
 @Composable
 private fun LocalMediaPlaceholderBox(
@@ -1043,7 +994,7 @@ private fun StudioDrawerOverlay(
                     .background(SynkaPalette.SindoorCrimson.copy(alpha = 0.16f))
                     .border(1.dp, SynkaPalette.SindoorCrimson.copy(alpha = 0.5f), RoundedCornerShape(10.dp))
                     .clickable {
-                        throw RuntimeException("Synka Test Gate 10: Simulated uncaught exception")
+                        throw RuntimeException("Synka Test Gate 11: Simulated uncaught exception")
                     }
                     .padding(horizontal = 12.dp, vertical = 9.dp),
                 contentAlignment = Alignment.Center
