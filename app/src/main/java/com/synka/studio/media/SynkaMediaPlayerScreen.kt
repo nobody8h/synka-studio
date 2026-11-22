@@ -2,8 +2,13 @@ package com.synka.studio.media
 
 import android.Manifest
 import android.content.ComponentName
+import android.content.Context
+import android.content.Intent
 import android.content.pm.PackageManager
+import android.net.Uri
 import android.os.Build
+import android.provider.Settings
+import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.annotation.OptIn
@@ -37,12 +42,14 @@ import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.SkipNext
 import androidx.compose.material.icons.filled.SkipPrevious
 import androidx.compose.material.icons.filled.Usb
+import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.FilterChipDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Slider
 import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Text
@@ -67,8 +74,12 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MediaMetadata
+import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.session.MediaController
@@ -80,17 +91,42 @@ import com.synka.studio.display.shader.synkaDisplayEqGpu
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import java.util.Locale
+import java.util.concurrent.CancellationException
 
 private val ObsidianBg = Color(0xFF121212)
 private val ObsidianSurface = Color(0xFF1C1C1E)
 private val KansaBronze = Color(0xFFD49A45)
 private val LosslessMint = Color(0xFF81C995)
+private val AlertCoral = Color(0xFFF28B82)
 private val MutedText = Color(0xFF9E9EA6)
 
 private enum class LibraryTab(val label: String) {
     LOSSLESS("Lossless"),
-    ALL_AUDIO("All Audio"),
+    ALL_AUDIO("Audio"),
     VIDEO("Videos")
+}
+
+private fun hasAnyMediaReadPermission(context: Context): Boolean {
+    return when {
+        Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE -> {
+            ContextCompat.checkSelfPermission(context, Manifest.permission.READ_MEDIA_AUDIO) ==
+                PackageManager.PERMISSION_GRANTED ||
+                ContextCompat.checkSelfPermission(context, Manifest.permission.READ_MEDIA_VIDEO) ==
+                PackageManager.PERMISSION_GRANTED ||
+                ContextCompat.checkSelfPermission(context, Manifest.permission.READ_MEDIA_VISUAL_USER_SELECTED) ==
+                PackageManager.PERMISSION_GRANTED
+        }
+        Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU -> {
+            ContextCompat.checkSelfPermission(context, Manifest.permission.READ_MEDIA_AUDIO) ==
+                PackageManager.PERMISSION_GRANTED ||
+                ContextCompat.checkSelfPermission(context, Manifest.permission.READ_MEDIA_VIDEO) ==
+                PackageManager.PERMISSION_GRANTED
+        }
+        else -> {
+            ContextCompat.checkSelfPermission(context, Manifest.permission.READ_EXTERNAL_STORAGE) ==
+                PackageManager.PERMISSION_GRANTED
+        }
+    }
 }
 
 @OptIn(UnstableApi::class)
@@ -100,6 +136,7 @@ fun SynkaMediaPlayerScreen(
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
+    val lifecycleOwner = LocalLifecycleOwner.current
     val scope = rememberCoroutineScope()
 
     val activeExoPlayer by SynkaPlaybackService.activePlayer.collectAsState()
@@ -109,6 +146,10 @@ fun SynkaMediaPlayerScreen(
     val videoAspect by SynkaPlaybackService.videoAspectRatio.collectAsState()
 
     var controller by remember { mutableStateOf<MediaController?>(null) }
+    var connectionError by remember { mutableStateOf<String?>(null) }
+    var playbackError by remember { mutableStateOf<String?>(null) }
+    var reconnectNonce by remember { mutableIntStateOf(0) }
+
     var isPlaying by remember { mutableStateOf(false) }
     var nowPlayingTitle by remember { mutableStateOf("Select a lossless track or video") }
     var nowPlayingSubtitle by remember { mutableStateOf("FLAC • WAV • 24-bit / 192 kHz • Local Video") }
@@ -117,9 +158,11 @@ fun SynkaMediaPlayerScreen(
     var isScrubbing by remember { mutableStateOf(false) }
 
     var selectedTab by remember { mutableStateOf(LibraryTab.LOSSLESS) }
+    var didAutoSelectTab by remember { mutableStateOf(false) }
     var library by remember { mutableStateOf(LocalMediaLibrary()) }
     var isScanning by remember { mutableStateOf(false) }
     var activeTrackIndex by remember { mutableIntStateOf(-1) }
+    var permissionRequestedOnce by remember { mutableStateOf(false) }
 
     val requiredPermissions = remember {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
@@ -133,34 +176,78 @@ fun SynkaMediaPlayerScreen(
     }
 
     var hasStoragePermission by remember {
-        mutableStateOf(
-            requiredPermissions.all { perm ->
-                ContextCompat.checkSelfPermission(context, perm) == PackageManager.PERMISSION_GRANTED
-            }
-        )
+        mutableStateOf(hasAnyMediaReadPermission(context))
     }
 
     val refreshLibrary: () -> Unit = {
         scope.launch {
             isScanning = true
-            library = LocalMediaScanner.scanLibrary(context)
+            val scanned = LocalMediaScanner.scanLibrary(context)
+            library = scanned
+            if (!didAutoSelectTab) {
+                didAutoSelectTab = true
+                if (selectedTab == LibraryTab.LOSSLESS && scanned.losslessAudioTracks.isEmpty()) {
+                    selectedTab = when {
+                        scanned.audioTracks.isNotEmpty() -> LibraryTab.ALL_AUDIO
+                        scanned.videoTracks.isNotEmpty() -> LibraryTab.VIDEO
+                        else -> LibraryTab.LOSSLESS
+                    }
+                }
+            }
             isScanning = false
         }
     }
 
     val permissionLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestMultiplePermissions()
-    ) { grants ->
-        hasStoragePermission = grants.values.any { it }
-        if (hasStoragePermission) refreshLibrary()
+    ) {
+        permissionRequestedOnce = true
+        hasStoragePermission = hasAnyMediaReadPermission(context)
+        if (hasStoragePermission) {
+            refreshLibrary()
+        } else {
+            Toast.makeText(
+                context,
+                "Media permission not granted. Use Open Settings or the folder icon.",
+                Toast.LENGTH_SHORT
+            ).show()
+        }
     }
 
-    // Zero-permission fallback: lets users open any local FLAC/WAV/MP4/MKV immediately
+    // Refresh permission state if the user enabled access in Android Settings and returned
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) {
+                val grantedNow = hasAnyMediaReadPermission(context)
+                val becameGranted = grantedNow && !hasStoragePermission
+                hasStoragePermission = grantedNow
+                if (becameGranted) refreshLibrary()
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
+
     val filePickerLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.OpenDocument()
     ) { pickedUri ->
         val uri = pickedUri ?: return@rememberLauncherForActivityResult
-        val ctrl = controller ?: return@rememberLauncherForActivityResult
+        runCatching {
+            context.contentResolver.takePersistableUriPermission(
+                uri,
+                Intent.FLAG_GRANT_READ_URI_PERMISSION
+            )
+        }
+        val ctrl = controller
+        if (ctrl == null) {
+            Toast.makeText(
+                context,
+                "Playback service is not connected yet. Tap Retry above.",
+                Toast.LENGTH_SHORT
+            ).show()
+            return@rememberLauncherForActivityResult
+        }
+        playbackError = null
         val name = uri.lastPathSegment?.substringAfterLast('/') ?: "Local Media"
         val item = MediaItem.Builder()
             .setUri(uri)
@@ -178,54 +265,88 @@ fun SynkaMediaPlayerScreen(
         nowPlayingSubtitle = "Direct Local File"
     }
 
-    // Connect MediaController to SynkaPlaybackService so lock-screen & background audio stay alive
-    DisposableEffect(context) {
+    // Bind MediaController to SynkaPlaybackService with explicit failure reporting
+    DisposableEffect(context, reconnectNonce) {
+        connectionError = null
         val sessionToken = SessionToken(
             context,
             ComponentName(context, SynkaPlaybackService::class.java)
         )
         val future = MediaController.Builder(context, sessionToken).buildAsync()
+        var boundController: MediaController? = null
         var attachedListener: Player.Listener? = null
 
         future.addListener(
             {
-                runCatching { future.get() }.onSuccess { mc ->
-                    controller = mc
-                    isPlaying = mc.isPlaying
-                    durationMs = mc.duration.coerceAtLeast(0L)
-                    positionMs = mc.currentPosition.coerceAtLeast(0L)
-                    mc.mediaMetadata.title?.toString()?.let { nowPlayingTitle = it }
-                    mc.mediaMetadata.artist?.toString()?.let { nowPlayingSubtitle = it }
-
-                    val listener = object : Player.Listener {
-                        override fun onIsPlayingChanged(playing: Boolean) {
-                            isPlaying = playing
+                runCatching { future.get() }
+                    .onSuccess { mc ->
+                        boundController = mc
+                        controller = mc
+                        connectionError = null
+                        isPlaying = mc.isPlaying
+                        durationMs = mc.duration.coerceAtLeast(0L)
+                        positionMs = mc.currentPosition.coerceAtLeast(0L)
+                        mc.mediaMetadata.title?.toString()?.takeIf { it.isNotBlank() }?.let {
+                            nowPlayingTitle = it
+                        }
+                        mc.mediaMetadata.artist?.toString()?.takeIf { it.isNotBlank() }?.let {
+                            nowPlayingSubtitle = it
                         }
 
-                        override fun onMediaMetadataChanged(mediaMetadata: MediaMetadata) {
-                            mediaMetadata.title?.toString()?.takeIf { it.isNotBlank() }?.let {
-                                nowPlayingTitle = it
+                        val listener = object : Player.Listener {
+                            override fun onIsPlayingChanged(playing: Boolean) {
+                                isPlaying = playing
                             }
-                            mediaMetadata.artist?.toString()?.takeIf { it.isNotBlank() }?.let {
-                                nowPlayingSubtitle = it
+
+                            override fun onMediaMetadataChanged(mediaMetadata: MediaMetadata) {
+                                mediaMetadata.title?.toString()?.takeIf { it.isNotBlank() }?.let {
+                                    nowPlayingTitle = it
+                                }
+                                mediaMetadata.artist?.toString()?.takeIf { it.isNotBlank() }?.let {
+                                    nowPlayingSubtitle = it
+                                }
+                            }
+
+                            override fun onPlaybackStateChanged(playbackState: Int) {
+                                durationMs = mc.duration.coerceAtLeast(0L)
+                                if (playbackState == Player.STATE_READY) {
+                                    playbackError = null
+                                }
+                            }
+
+                            override fun onPlayerError(error: PlaybackException) {
+                                playbackError = "Playback failed (${error.errorCodeName}): " +
+                                    (error.message ?: "Unsupported format")
                             }
                         }
-
-                        override fun onPlaybackStateChanged(playbackState: Int) {
-                            durationMs = mc.duration.coerceAtLeast(0L)
+                        attachedListener = listener
+                        mc.addListener(listener)
+                    }
+                    .onFailure { err ->
+                        if (err !is CancellationException) {
+                            connectionError = "Playback service failed: " +
+                                (err.cause?.message ?: err.message ?: "Check AndroidManifest.xml")
                         }
                     }
-                    attachedListener = listener
-                    mc.addListener(listener)
-                }
             },
             ContextCompat.getMainExecutor(context)
         )
 
         onDispose {
-            attachedListener?.let { controller?.removeListener(it) }
+            attachedListener?.let { boundController?.removeListener(it) }
+            boundController = null
             controller = null
             MediaController.releaseFuture(future)
+        }
+    }
+
+    // Watchdog: catches buildAsync() hanging silently if SynkaPlaybackService is missing in Manifest
+    LaunchedEffect(reconnectNonce, controller) {
+        if (controller == null) {
+            delay(4000L)
+            if (controller == null && connectionError == null) {
+                connectionError = "SynkaPlaybackService did not respond. Verify it is declared in AndroidManifest.xml."
+            }
         }
     }
 
@@ -260,9 +381,46 @@ fun SynkaMediaPlayerScreen(
             .background(ObsidianBg)
             .padding(14.dp)
     ) {
-        // 1. LIVE VIDEO STAGE (Uses SURFACE_TYPE_TEXTURE_VIEW so Tier 3 AGSL Display EQ grades video!)
-        if (hasVideoTrack) {
-            val videoPlayer: Player? = activeExoPlayer ?: controller
+        // 0. DIAGNOSTIC BANNER (Never fail silently)
+        val bannerMessage = connectionError ?: playbackError
+        if (bannerMessage != null) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(10.dp))
+                    .background(AlertCoral.copy(alpha = 0.14f))
+                    .border(1.dp, AlertCoral.copy(alpha = 0.45f), RoundedCornerShape(10.dp))
+                    .padding(horizontal = 10.dp, vertical = 8.dp)
+            ) {
+                Icon(
+                    imageVector = Icons.Default.Warning,
+                    contentDescription = null,
+                    tint = AlertCoral,
+                    modifier = Modifier.size(18.dp)
+                )
+                Spacer(Modifier.width(8.dp))
+                Text(
+                    text = bannerMessage,
+                    color = AlertCoral,
+                    fontSize = 11.5.sp,
+                    modifier = Modifier.weight(1f)
+                )
+                if (connectionError != null) {
+                    Spacer(Modifier.width(6.dp))
+                    OutlinedButton(
+                        onClick = { reconnectNonce++ }
+                    ) {
+                        Text("Retry", color = KansaBronze, fontSize = 11.sp)
+                    }
+                }
+            }
+            Spacer(Modifier.height(8.dp))
+        }
+
+        // 1. LIVE VIDEO STAGE (SURFACE_TYPE_TEXTURE_VIEW enables Tier 3 AGSL Display EQ grading)
+        val videoPlayer: Player? = activeExoPlayer ?: controller
+        if (hasVideoTrack && videoPlayer != null) {
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -326,7 +484,6 @@ fun SynkaMediaPlayerScreen(
 
             Spacer(Modifier.height(6.dp))
 
-            // Honest signal path badge
             val badgeColor = when {
                 telemetry.isBitPerfectActive -> LosslessMint
                 telemetry.isLosslessSource -> KansaBronze
@@ -368,7 +525,6 @@ fun SynkaMediaPlayerScreen(
 
             Spacer(Modifier.height(6.dp))
 
-            // Output mode selector (Studio 32-bit Float vs USB Bit-Perfect Direct)
             Row(
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
                 modifier = Modifier.fillMaxWidth()
@@ -396,7 +552,6 @@ fun SynkaMediaPlayerScreen(
                 }
             }
 
-            // Scrubber
             val maxDur = durationMs.coerceAtLeast(1L).toFloat()
             Slider(
                 value = positionMs.coerceIn(0L, durationMs.coerceAtLeast(1L)).toFloat(),
@@ -424,20 +579,34 @@ fun SynkaMediaPlayerScreen(
                 Text(formatDuration(durationMs), color = MutedText, fontSize = 11.sp)
             }
 
-            // Transport buttons
             Row(
                 horizontalArrangement = Arrangement.Center,
                 verticalAlignment = Alignment.CenterVertically,
                 modifier = Modifier.fillMaxWidth()
             ) {
-                IconButton(onClick = { controller?.seekToPreviousMediaItem() }) {
+                IconButton(
+                    onClick = {
+                        val ctrl = controller
+                        if (ctrl == null) {
+                            Toast.makeText(context, "Player service connecting...", Toast.LENGTH_SHORT).show()
+                        } else {
+                            ctrl.seekToPreviousMediaItem()
+                        }
+                    }
+                ) {
                     Icon(Icons.Default.SkipPrevious, contentDescription = "Previous", tint = Color.White)
                 }
                 Spacer(Modifier.width(16.dp))
                 IconButton(
                     onClick = {
-                        val ctrl = controller ?: return@IconButton
-                        if (ctrl.isPlaying) ctrl.pause() else ctrl.play()
+                        val ctrl = controller
+                        if (ctrl == null) {
+                            Toast.makeText(context, "Player service connecting...", Toast.LENGTH_SHORT).show()
+                        } else if (ctrl.isPlaying) {
+                            ctrl.pause()
+                        } else {
+                            ctrl.play()
+                        }
                     },
                     modifier = Modifier
                         .size(48.dp)
@@ -451,7 +620,16 @@ fun SynkaMediaPlayerScreen(
                     )
                 }
                 Spacer(Modifier.width(16.dp))
-                IconButton(onClick = { controller?.seekToNextMediaItem() }) {
+                IconButton(
+                    onClick = {
+                        val ctrl = controller
+                        if (ctrl == null) {
+                            Toast.makeText(context, "Player service connecting...", Toast.LENGTH_SHORT).show()
+                        } else {
+                            ctrl.seekToNextMediaItem()
+                        }
+                    }
+                ) {
                     Icon(Icons.Default.SkipNext, contentDescription = "Next", tint = Color.White)
                 }
             }
@@ -459,18 +637,23 @@ fun SynkaMediaPlayerScreen(
 
         Spacer(Modifier.height(10.dp))
 
-        // 3. LIBRARY FILTER TABS
+        // 3. LIBRARY FILTER TABS WITH LIVE COUNTS
         Row(
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.SpaceBetween,
             modifier = Modifier.fillMaxWidth()
         ) {
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                 LibraryTab.entries.forEach { tab ->
+                    val count = when (tab) {
+                        LibraryTab.LOSSLESS -> library.losslessAudioTracks.size
+                        LibraryTab.ALL_AUDIO -> library.audioTracks.size
+                        LibraryTab.VIDEO -> library.videoTracks.size
+                    }
                     FilterChip(
                         selected = selectedTab == tab,
                         onClick = { selectedTab = tab },
-                        label = { Text(tab.label, fontSize = 12.sp) },
+                        label = { Text("${tab.label} ($count)", fontSize = 11.5.sp) },
                         colors = FilterChipDefaults.filterChipColors(
                             selectedContainerColor = KansaBronze.copy(alpha = 0.25f),
                             selectedLabelColor = KansaBronze
@@ -478,7 +661,15 @@ fun SynkaMediaPlayerScreen(
                     )
                 }
             }
-            IconButton(onClick = { if (hasStoragePermission) refreshLibrary() else permissionLauncher.launch(requiredPermissions) }) {
+            IconButton(
+                onClick = {
+                    if (hasStoragePermission) {
+                        refreshLibrary()
+                    } else {
+                        permissionLauncher.launch(requiredPermissions)
+                    }
+                }
+            ) {
                 Icon(Icons.Default.Refresh, contentDescription = "Rescan Library", tint = MutedText)
             }
         }
@@ -500,11 +691,29 @@ fun SynkaMediaPlayerScreen(
                     fontSize = 12.5.sp
                 )
                 Spacer(Modifier.height(12.dp))
-                Button(
-                    onClick = { permissionLauncher.launch(requiredPermissions) },
-                    colors = ButtonDefaults.buttonColors(containerColor = KansaBronze, contentColor = ObsidianBg)
-                ) {
-                    Text("Scan Local Lossless & Video Library", fontWeight = FontWeight.SemiBold)
+                Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Button(
+                        onClick = { permissionLauncher.launch(requiredPermissions) },
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = KansaBronze,
+                            contentColor = ObsidianBg
+                        )
+                    ) {
+                        Text("Scan Local Library", fontWeight = FontWeight.SemiBold)
+                    }
+                    if (permissionRequestedOnce) {
+                        OutlinedButton(
+                            onClick = {
+                                val intent = Intent(
+                                    Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                                    Uri.fromParts("package", context.packageName, null)
+                                )
+                                runCatching { context.startActivity(intent) }
+                            }
+                        ) {
+                            Text("Open Settings", color = KansaBronze)
+                        }
+                    }
                 }
             }
         } else if (isScanning) {
@@ -525,7 +734,7 @@ fun SynkaMediaPlayerScreen(
             ) {
                 Text(
                     text = if (selectedTab == LibraryTab.LOSSLESS) {
-                        "No local FLAC/WAV files found yet. Tap the folder icon to pick any file."
+                        "No local FLAC/WAV files found. Switch to Audio/Videos or tap the folder icon to pick any file."
                     } else {
                         "No local files found in this category."
                     },
@@ -549,7 +758,16 @@ fun SynkaMediaPlayerScreen(
                             .clip(RoundedCornerShape(10.dp))
                             .background(if (isCurrent) KansaBronze.copy(alpha = 0.16f) else ObsidianSurface)
                             .clickable {
-                                val ctrl = controller ?: return@clickable
+                                val ctrl = controller
+                                if (ctrl == null) {
+                                    Toast.makeText(
+                                        context,
+                                        "Playback service not connected yet. Tap Retry.",
+                                        Toast.LENGTH_SHORT
+                                    ).show()
+                                    return@clickable
+                                }
+                                playbackError = null
                                 val queue = displayedTracks.map { item ->
                                     MediaItem.Builder()
                                         .setUri(item.uri)
