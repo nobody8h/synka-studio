@@ -11,7 +11,7 @@ import kotlin.math.pow
 
 object ArkaDisplayShader {
 
-    const val AGSL_SOURCE: String = """
+    val AGSL_SOURCE: String = """
         uniform shader srcContent;
         uniform float2 uResolution;
         uniform float4 uToneA;
