@@ -3,6 +3,7 @@ package com.synka.studio.media
 import android.Manifest
 import android.content.ComponentName
 import android.content.Context
+import android.content.ContextWrapper
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
@@ -76,7 +77,7 @@ import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
-import androidx.lifecycle.compose.LocalLifecycleOwner
+import androidx.lifecycle.LifecycleOwner
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MediaMetadata
 import androidx.media3.common.PlaybackException
@@ -104,6 +105,12 @@ private enum class LibraryTab(val label: String) {
     LOSSLESS("Lossless"),
     ALL_AUDIO("Audio"),
     VIDEO("Videos")
+}
+
+private tailrec fun Context.findMediaLifecycleOwner(): LifecycleOwner? = when (this) {
+    is LifecycleOwner -> this
+    is ContextWrapper -> baseContext.findMediaLifecycleOwner()
+    else -> null
 }
 
 private fun hasAnyMediaReadPermission(context: Context): Boolean {
@@ -136,7 +143,7 @@ fun SynkaMediaPlayerScreen(
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
-    val lifecycleOwner = LocalLifecycleOwner.current
+    val lifecycleOwner = remember(context) { context.findMediaLifecycleOwner() }
     val scope = rememberCoroutineScope()
 
     val activeExoPlayer by SynkaPlaybackService.activePlayer.collectAsState()
@@ -214,8 +221,8 @@ fun SynkaMediaPlayerScreen(
         }
     }
 
-    // Refresh permission state if the user enabled access in Android Settings and returned
     DisposableEffect(lifecycleOwner) {
+        if (lifecycleOwner == null) return@DisposableEffect onDispose {}
         val observer = LifecycleEventObserver { _, event ->
             if (event == Lifecycle.Event.ON_RESUME) {
                 val grantedNow = hasAnyMediaReadPermission(context)
@@ -265,7 +272,6 @@ fun SynkaMediaPlayerScreen(
         nowPlayingSubtitle = "Direct Local File"
     }
 
-    // Bind MediaController to SynkaPlaybackService with explicit failure reporting
     DisposableEffect(context, reconnectNonce) {
         connectionError = null
         val sessionToken = SessionToken(
@@ -340,12 +346,11 @@ fun SynkaMediaPlayerScreen(
         }
     }
 
-    // Watchdog: catches buildAsync() hanging silently if SynkaPlaybackService is missing in Manifest
     LaunchedEffect(reconnectNonce, controller) {
         if (controller == null) {
             delay(4000L)
             if (controller == null && connectionError == null) {
-                connectionError = "SynkaPlaybackService did not respond. Verify it is declared in AndroidManifest.xml."
+                connectionError = "SynkaPlaybackService did not respond. Verify AndroidManifest.xml."
             }
         }
     }
@@ -381,7 +386,6 @@ fun SynkaMediaPlayerScreen(
             .background(ObsidianBg)
             .padding(14.dp)
     ) {
-        // 0. DIAGNOSTIC BANNER (Never fail silently)
         val bannerMessage = connectionError ?: playbackError
         if (bannerMessage != null) {
             Row(
@@ -408,9 +412,7 @@ fun SynkaMediaPlayerScreen(
                 )
                 if (connectionError != null) {
                     Spacer(Modifier.width(6.dp))
-                    OutlinedButton(
-                        onClick = { reconnectNonce++ }
-                    ) {
+                    OutlinedButton(onClick = { reconnectNonce++ }) {
                         Text("Retry", color = KansaBronze, fontSize = 11.sp)
                     }
                 }
@@ -418,7 +420,6 @@ fun SynkaMediaPlayerScreen(
             Spacer(Modifier.height(8.dp))
         }
 
-        // 1. LIVE VIDEO STAGE (SURFACE_TYPE_TEXTURE_VIEW enables Tier 3 AGSL Display EQ grading)
         val videoPlayer: Player? = activeExoPlayer ?: controller
         if (hasVideoTrack && videoPlayer != null) {
             Box(
@@ -440,7 +441,6 @@ fun SynkaMediaPlayerScreen(
             Spacer(Modifier.height(10.dp))
         }
 
-        // 2. NOW PLAYING + HONEST LOSSLESS SIGNAL TELEMETRY CARD
         Column(
             modifier = Modifier
                 .fillMaxWidth()
@@ -637,7 +637,6 @@ fun SynkaMediaPlayerScreen(
 
         Spacer(Modifier.height(10.dp))
 
-        // 3. LIBRARY FILTER TABS WITH LIVE COUNTS
         Row(
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.SpaceBetween,
@@ -676,7 +675,6 @@ fun SynkaMediaPlayerScreen(
 
         Spacer(Modifier.height(6.dp))
 
-        // 4. LOCAL LOSSLESS MUSIC & VIDEO LIST
         if (!hasStoragePermission) {
             Column(
                 horizontalAlignment = Alignment.CenterHorizontally,
