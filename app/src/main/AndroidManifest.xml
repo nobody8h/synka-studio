@@ -1,17 +1,19 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
-    <!-- Audio EQ & Background Media Playback -->
+    <!-- Audio EQ, Waveform Visualizer & Background Playback -->
     <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
-    <!-- Local Lossless Music & Video Library Access -->
+    <!-- Local Lossless Music & Video Library Access (Android 8 through Android 16) -->
     <uses-permission android:name="android.permission.READ_MEDIA_AUDIO" />
     <uses-permission android:name="android.permission.READ_MEDIA_VIDEO" />
+    <uses-permission android:name="android.permission.READ_MEDIA_VISUAL_USER_SELECTED" />
     <uses-permission
         android:name="android.permission.READ_EXTERNAL_STORAGE"
         android:maxSdkVersion="32" />
@@ -34,7 +36,7 @@
             </intent-filter>
         </activity>
 
-        <!-- Shizuku IPC Provider -->
+        <!-- Shizuku IPC Provider (Tier 2 Hardware Escalation) -->
         <provider
             android:name="rikka.shizuku.ShizukuProvider"
             android:authorities="${applicationId}.shizuku"
@@ -43,7 +45,18 @@
             android:multiprocess="false"
             android:permission="android.permission.INTERACT_ACROSS_USERS_FULL" />
 
-        <!-- Display EQ Foreground Service (Android 14-16 specialUse compliant) -->
+        <!-- Restored v1 Overlay Service (referenced by MainActivity.kt & SynkaEngine) -->
+        <service
+            android:name=".SynkaOverlayService"
+            android:enabled="true"
+            android:exported="false"
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="User-activated Synka Studio display overlay filter service." />
+        </service>
+
+        <!-- New 3-Tier Display EQ Foreground Service (Android 14-16 specialUse compliant) -->
         <service
             android:name=".display.service.DisplayEqForegroundService"
             android:enabled="true"
