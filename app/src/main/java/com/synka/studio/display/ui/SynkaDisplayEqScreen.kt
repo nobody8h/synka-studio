@@ -111,10 +111,10 @@ private val QUICK_PRESETS = listOf(
     QuickDisplayPreset("Night Dim") { cur ->
         cur.copy(
             enabled = true,
-            dimStrength = 0.42f,
-            temperature = 0.55f,
+            dimStrength = 0.45f,
+            temperature = 0.65f,
             tint = 0f,
-            vignette = 0.20f,
+            vignette = 0.25f,
             redGain = 1f,
             greenGain = 1f,
             blueGain = 1f,
@@ -127,25 +127,25 @@ private val QUICK_PRESETS = listOf(
     QuickDisplayPreset("Warm Cinema") { cur ->
         cur.copy(
             enabled = true,
-            dimStrength = 0.12f,
-            temperature = 0.48f,
+            dimStrength = 0.16f,
+            temperature = 0.60f,
             tint = 0.08f,
             vignette = 0.35f,
             redGain = 1f,
             greenGain = 0.98f,
-            blueGain = 0.92f,
+            blueGain = 0.90f,
             exposure = 0f,
-            contrast = 0.22f,
+            contrast = 0.24f,
             gamma = 0.94f,
-            saturation = 0.14f,
-            vibrance = 0.18f
+            saturation = 0.16f,
+            vibrance = 0.20f
         )
     },
     QuickDisplayPreset("Paper Read") { cur ->
         cur.copy(
             enabled = true,
-            dimStrength = 0.24f,
-            temperature = 0.72f,
+            dimStrength = 0.28f,
+            temperature = 0.80f,
             tint = 0.05f,
             vignette = 0.10f,
             redGain = 1f,
@@ -159,13 +159,13 @@ private val QUICK_PRESETS = listOf(
         cur.copy(
             enabled = true,
             dimStrength = 0f,
-            temperature = -0.45f,
+            temperature = -0.60f,
             tint = 0f,
             vignette = 0f,
-            redGain = 0.94f,
+            redGain = 0.92f,
             greenGain = 1f,
-            blueGain = 1.05f,
-            contrast = 0.18f,
+            blueGain = 1.06f,
+            contrast = 0.20f,
             vibrance = 0.22f,
             sharpen = 0.35f
         )
@@ -174,14 +174,14 @@ private val QUICK_PRESETS = listOf(
         cur.copy(
             enabled = true,
             dimStrength = 0f,
-            temperature = 0.12f,
+            temperature = 0.15f,
             tint = 0f,
-            vignette = 0.15f,
-            contrast = 0.28f,
+            vignette = 0.18f,
+            contrast = 0.30f,
             gamma = 0.96f,
-            saturation = 0.30f,
-            vibrance = 0.35f,
-            sharpen = 0.30f
+            saturation = 0.35f,
+            vibrance = 0.38f,
+            sharpen = 0.35f
         )
     },
     QuickDisplayPreset("Reset Flat") { cur ->
@@ -266,10 +266,11 @@ fun SynkaDisplayEqScreen(
         }
     }
 
+    // Always applies state immediately so Live GPU Preview & Local Video react even before overlay permission
     fun applyOrRequestPermission(targetState: DisplayEqState) {
+        engine.setState(targetState)
         if (!targetState.enabled) {
             pendingStateAfterOverlay = null
-            engine.setState(targetState)
             return
         }
         val canRunSystemWide = engine.hasOverlayPermission() ||
@@ -278,19 +279,24 @@ fun SynkaDisplayEqScreen(
         if (canRunSystemWide) {
             pendingStateAfterOverlay = null
             requestNotificationIfNeeded()
-            engine.setState(targetState)
         } else {
             pendingStateAfterOverlay = targetState
             Toast.makeText(
                 context,
-                "Allow 'Display over other apps' once to activate System-Wide Display EQ.",
+                "GPU preview active. Allow 'Display over other apps' once for System-Wide Display EQ.",
                 Toast.LENGTH_LONG
             ).show()
             launchOverlayPermissionSettings()
         }
     }
 
-    // Refresh permissions & apply pending state automatically upon returning from Settings
+    // Auto-enables Display EQ whenever any slider is dragged so sliders never act like dummies
+    fun updateSlider(transform: (DisplayEqState) -> DisplayEqState) {
+        engine.updateState { current ->
+            transform(current).copy(enabled = true)
+        }
+    }
+
     DisposableEffect(lifecycleOwner) {
         if (lifecycleOwner == null) return@DisposableEffect onDispose {}
         val observer = LifecycleEventObserver { _, event ->
@@ -314,7 +320,6 @@ fun SynkaDisplayEqScreen(
         onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
     }
 
-    // Shizuku Binder & Permission Listeners (thread-safe main-handler dispatch)
     DisposableEffect(Unit) {
         val permListener = Shizuku.OnRequestPermissionResultListener { requestCode, grantResult ->
             if (requestCode == SHIZUKU_PERMISSION_REQ_CODE) {
@@ -365,10 +370,10 @@ fun SynkaDisplayEqScreen(
     }
 
     val tierHeadline = when {
-        !state.enabled -> "Off"
+        !state.enabled -> "Off — Tap switch, a preset, or drag any slider"
         state.isNeutral() -> "Armed (Flat) — Pick a preset or move any slider"
         activeTier == DisplayEqTier.INACTIVE && !hasOverlayPerm && !shizukuGranted ->
-            "GPU Preview Only (Grant Overlay for System-Wide)"
+            "In-App GPU Active — Grant Overlay below for System-Wide"
         else -> activeTier.label
     }
     val tierColor = when {
@@ -377,8 +382,7 @@ fun SynkaDisplayEqScreen(
             activeTier == DisplayEqTier.TIER2_ROOT_SURFACEFLINGER -> MintLive
         activeTier == DisplayEqTier.TIER1_STANDARD_OVERLAY ||
             activeTier == DisplayEqTier.TIER1_TRUSTED_A11Y_OVERLAY -> KansaBronze
-        state.isNeutral() -> KansaBronze
-        else -> MutedText
+        else -> KansaBronze
     }
 
     Column(
@@ -395,7 +399,11 @@ fun SynkaDisplayEqScreen(
                 .fillMaxWidth()
                 .clip(RoundedCornerShape(14.dp))
                 .background(ObsidianSurface)
-                .border(1.dp, if (state.enabled) KansaBronze.copy(alpha = 0.5f) else BorderHairline, RoundedCornerShape(14.dp))
+                .border(
+                    1.dp,
+                    if (state.enabled) KansaBronze.copy(alpha = 0.55f) else BorderHairline,
+                    RoundedCornerShape(14.dp)
+                )
                 .padding(14.dp)
         ) {
             Row(
@@ -426,8 +434,8 @@ fun SynkaDisplayEqScreen(
                     onCheckedChange = { wantOn ->
                         if (wantOn) {
                             val nextState = if (state.isNeutral()) {
-                                // Subtle warm comfort default so flipping ON gives immediate feedback
-                                state.copy(enabled = true, temperature = 0.25f, dimStrength = 0.08f)
+                                // Unmistakable warm + dim default so visual shift is immediately obvious
+                                state.copy(enabled = true, temperature = 0.55f, dimStrength = 0.22f)
                             } else {
                                 state.copy(enabled = true)
                             }
@@ -447,11 +455,13 @@ fun SynkaDisplayEqScreen(
                 Spacer(Modifier.height(10.dp))
                 Button(
                     onClick = {
-                        pendingStateAfterOverlay = if (state.isNeutral()) {
-                            state.copy(enabled = true, temperature = 0.25f, dimStrength = 0.08f)
+                        val nextState = if (state.isNeutral()) {
+                            state.copy(enabled = true, temperature = 0.55f, dimStrength = 0.22f)
                         } else {
                             state.copy(enabled = true)
                         }
+                        pendingStateAfterOverlay = nextState
+                        engine.setState(nextState)
                         launchOverlayPermissionSettings()
                     },
                     colors = ButtonDefaults.buttonColors(
@@ -464,7 +474,6 @@ fun SynkaDisplayEqScreen(
                 }
             }
 
-            // Show Shizuku upgrade ONLY if Shizuku is already running on this phone
             if (shizukuRunning && !shizukuGranted) {
                 Spacer(Modifier.height(8.dp))
                 OutlinedButton(
@@ -502,7 +511,7 @@ fun SynkaDisplayEqScreen(
             }
         }
 
-        // 2. LIVE AGSL GPU CALIBRATION REFERENCE STRIP (Proves Tier 3 Shader Live Immediately)
+        // 2. LIVE AGSL GPU CALIBRATION REFERENCE STRIP
         Column(
             modifier = Modifier
                 .fillMaxWidth()
@@ -576,28 +585,28 @@ fun SynkaDisplayEqScreen(
                 valueText = "${(state.dimStrength / 0.72f * 100f).roundToInt()}%",
                 value = state.dimStrength,
                 range = 0f..0.72f,
-                onValueChange = { v -> engine.updateState { it.copy(dimStrength = v) } }
+                onValueChange = { v -> updateSlider { it.copy(dimStrength = v) } }
             )
             EqSliderRow(
                 label = "Color Temperature",
                 valueText = formatSignedPct(state.temperature, neg = "Cool", pos = "Warm"),
                 value = state.temperature,
                 range = -1f..1f,
-                onValueChange = { v -> engine.updateState { it.copy(temperature = v) } }
+                onValueChange = { v -> updateSlider { it.copy(temperature = v) } }
             )
             EqSliderRow(
                 label = "Tint (Green / Magenta)",
                 valueText = formatSignedPct(state.tint, neg = "Green", pos = "Mag"),
                 value = state.tint,
                 range = -1f..1f,
-                onValueChange = { v -> engine.updateState { it.copy(tint = v) } }
+                onValueChange = { v -> updateSlider { it.copy(tint = v) } }
             )
             EqSliderRow(
                 label = "Pure-Black Vignette",
                 valueText = "${(state.vignette * 100f).roundToInt()}%",
                 value = state.vignette,
                 range = 0f..1f,
-                onValueChange = { v -> engine.updateState { it.copy(vignette = v) } }
+                onValueChange = { v -> updateSlider { it.copy(vignette = v) } }
             )
 
             HorizontalDivider(thickness = 1.dp, color = BorderHairline)
@@ -608,21 +617,21 @@ fun SynkaDisplayEqScreen(
                 valueText = "${(state.redGain * 100f).roundToInt()}%",
                 value = state.redGain,
                 range = 0.2f..1.25f,
-                onValueChange = { v -> engine.updateState { it.copy(redGain = v) } }
+                onValueChange = { v -> updateSlider { it.copy(redGain = v) } }
             )
             EqSliderRow(
                 label = "Green Gain",
                 valueText = "${(state.greenGain * 100f).roundToInt()}%",
                 value = state.greenGain,
                 range = 0.2f..1.25f,
-                onValueChange = { v -> engine.updateState { it.copy(greenGain = v) } }
+                onValueChange = { v -> updateSlider { it.copy(greenGain = v) } }
             )
             EqSliderRow(
                 label = "Blue Gain",
                 valueText = "${(state.blueGain * 100f).roundToInt()}%",
                 value = state.blueGain,
                 range = 0.2f..1.25f,
-                onValueChange = { v -> engine.updateState { it.copy(blueGain = v) } }
+                onValueChange = { v -> updateSlider { it.copy(blueGain = v) } }
             )
 
             Row(
@@ -649,7 +658,7 @@ fun SynkaDisplayEqScreen(
             }
         }
 
-        // 5. SECTION B: TONE, SATURATION & OPTICS (Hardware + In-App GPU)
+        // 5. SECTION B: TONE, SATURATION & OPTICS
         val satScope = engine.scopeForControl("saturation")
         val toneScope = engine.scopeForControl("contrast")
         SectionCard(
@@ -668,42 +677,42 @@ fun SynkaDisplayEqScreen(
                 valueText = formatSignedPct(state.saturation),
                 value = state.saturation,
                 range = -1f..1f,
-                onValueChange = { v -> engine.updateState { it.copy(saturation = v) } }
+                onValueChange = { v -> updateSlider { it.copy(saturation = v) } }
             )
             EqSliderRow(
                 label = "Exposure (EV)",
                 valueText = String.format(Locale.US, "%+.2f EV", state.exposure),
                 value = state.exposure,
                 range = -2f..2f,
-                onValueChange = { v -> engine.updateState { it.copy(exposure = v) } }
+                onValueChange = { v -> updateSlider { it.copy(exposure = v) } }
             )
             EqSliderRow(
                 label = "Contrast",
                 valueText = formatSignedPct(state.contrast),
                 value = state.contrast,
                 range = -1f..1f,
-                onValueChange = { v -> engine.updateState { it.copy(contrast = v) } }
+                onValueChange = { v -> updateSlider { it.copy(contrast = v) } }
             )
             EqSliderRow(
                 label = "Gamma",
                 valueText = String.format(Locale.US, "%.2f", state.gamma),
                 value = state.gamma,
                 range = 0.4f..2.5f,
-                onValueChange = { v -> engine.updateState { it.copy(gamma = v) } }
+                onValueChange = { v -> updateSlider { it.copy(gamma = v) } }
             )
             EqSliderRow(
                 label = "Vibrance",
                 valueText = formatSignedPct(state.vibrance),
                 value = state.vibrance,
                 range = -1f..1f,
-                onValueChange = { v -> engine.updateState { it.copy(vibrance = v) } }
+                onValueChange = { v -> updateSlider { it.copy(vibrance = v) } }
             )
             EqSliderRow(
                 label = "Sharpen (Unsharp Mask)",
                 valueText = "${(state.sharpen * 100f).roundToInt()}%",
                 value = state.sharpen,
                 range = 0f..1f,
-                onValueChange = { v -> engine.updateState { it.copy(sharpen = v) } }
+                onValueChange = { v -> updateSlider { it.copy(sharpen = v) } }
             )
 
             HorizontalDivider(thickness = 1.dp, color = BorderHairline)
@@ -714,32 +723,32 @@ fun SynkaDisplayEqScreen(
                 valueText = formatSignedPct(state.blacks),
                 value = state.blacks,
                 range = -1f..1f,
-                onValueChange = { v -> engine.updateState { it.copy(blacks = v) } }
+                onValueChange = { v -> updateSlider { it.copy(blacks = v) } }
             )
             EqSliderRow(
                 label = "Shadows",
                 valueText = formatSignedPct(state.shadows),
                 value = state.shadows,
                 range = -1f..1f,
-                onValueChange = { v -> engine.updateState { it.copy(shadows = v) } }
+                onValueChange = { v -> updateSlider { it.copy(shadows = v) } }
             )
             EqSliderRow(
                 label = "Highlights",
                 valueText = formatSignedPct(state.highlights),
                 value = state.highlights,
                 range = -1f..1f,
-                onValueChange = { v -> engine.updateState { it.copy(highlights = v) } }
+                onValueChange = { v -> updateSlider { it.copy(highlights = v) } }
             )
             EqSliderRow(
                 label = "Whites",
                 valueText = formatSignedPct(state.whites),
                 value = state.whites,
                 range = -1f..1f,
-                onValueChange = { v -> engine.updateState { it.copy(whites = v) } }
+                onValueChange = { v -> updateSlider { it.copy(whites = v) } }
             )
         }
 
-        // 6. SECTION C: 8-CHANNEL HSL COLOR GRADER (Tier 3 GPU)
+        // 6. SECTION C: 8-CHANNEL HSL COLOR GRADER
         SectionCard(
             title = "8-Channel HSL Grader",
             badgeText = "IN-APP VIDEO GPU",
@@ -795,21 +804,21 @@ fun SynkaDisplayEqScreen(
                 valueText = "${(hueVal * 30f).roundToInt()}°",
                 value = hueVal,
                 range = -1f..1f,
-                onValueChange = { v -> engine.updateState { it.copy(hslHue = it.hslHue.replaceAt(bandIdx, v)) } }
+                onValueChange = { v -> updateSlider { it.copy(hslHue = it.hslHue.replaceAt(bandIdx, v)) } }
             )
             EqSliderRow(
                 label = "${HSL_BAND_LABELS[bandIdx]} Saturation",
                 valueText = formatSignedPct(satVal),
                 value = satVal,
                 range = -1f..1f,
-                onValueChange = { v -> engine.updateState { it.copy(hslSat = it.hslSat.replaceAt(bandIdx, v)) } }
+                onValueChange = { v -> updateSlider { it.copy(hslSat = it.hslSat.replaceAt(bandIdx, v)) } }
             )
             EqSliderRow(
                 label = "${HSL_BAND_LABELS[bandIdx]} Luminance",
                 valueText = formatSignedPct(lumVal),
                 value = lumVal,
                 range = -1f..1f,
-                onValueChange = { v -> engine.updateState { it.copy(hslLum = it.hslLum.replaceAt(bandIdx, v)) } }
+                onValueChange = { v -> updateSlider { it.copy(hslLum = it.hslLum.replaceAt(bandIdx, v)) } }
             )
 
             OutlinedButton(
@@ -1003,7 +1012,6 @@ private fun CalibrationSwatchCanvas(modifier: Modifier = Modifier) {
         val midH = h * 0.28f
         val botH = h - topH - midH
 
-        // Top band: cinematic sky-to-sunset-to-skin-tone gradient
         drawRect(
             brush = Brush.horizontalGradient(
                 colors = listOf(
@@ -1020,7 +1028,6 @@ private fun CalibrationSwatchCanvas(modifier: Modifier = Modifier) {
             size = Size(w, topH)
         )
 
-        // Middle band: 8 HSL primary color blocks
         val bandW = w / HSL_BAND_SWATCHES.size
         HSL_BAND_SWATCHES.forEachIndexed { idx, col ->
             drawRect(
@@ -1030,7 +1037,6 @@ private fun CalibrationSwatchCanvas(modifier: Modifier = Modifier) {
             )
         }
 
-        // Bottom band: 8-step true-black (#000000) to pure-white (#FFFFFF) grayscale ramp
         val steps = 8
         val stepW = w / steps
         for (i in 0 until steps) {
