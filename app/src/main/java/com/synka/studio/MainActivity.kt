@@ -1,9 +1,4 @@
 package com.synka.studio
-import androidx.compose.runtime.collectAsState
-import androidx.compose.runtime.getValue
-import androidx.compose.ui.platform.LocalContext
-import com.synka.studio.display.engine.DisplayEqEngine
-import com.synka.studio.media.SynkaMediaPlayerScreen
 
 import android.content.ClipData
 import android.content.ClipboardManager
@@ -55,6 +50,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.rememberDrawerState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateMapOf
@@ -80,6 +76,8 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.synka.studio.display.engine.DisplayEqEngine
+import com.synka.studio.media.SynkaMediaPlayerScreen
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import java.io.File
@@ -154,6 +152,7 @@ class MainActivity : ComponentActivity() {
         super.onResume()
         SynkaOverlayService.refreshPermissionState(this)
         SynkaOverlayService.setSynkaUiForeground(true)
+        DisplayEqEngine.getInstance(this).reapplyNow()
     }
 
     override fun onPause() {
@@ -213,6 +212,7 @@ class MainActivity : ComponentActivity() {
 @Composable
 private fun SynkaAppShell(engine: SynkaEngine) {
     val context = LocalContext.current
+    val displayEqState by DisplayEqEngine.getInstance(context).state.collectAsState()
     val colors = LocalSynkaColors.current
     val scope = rememberCoroutineScope()
 
@@ -477,25 +477,9 @@ private fun SynkaAppShell(engine: SynkaEngine) {
                             )
                         }
                         SynkaTab.LOCAL_MEDIA -> {
-                            LocalMediaScreen(
-                                engine = engine,
-                                onVideoLoaded = { uri ->
-                                    syncGenreHighlightsForFileBinding(uri)
-                                    activeTab = SynkaTab.DISPLAY_EQ
-                                },
-                                onAudioLoaded = { uri, jumpToAudioStudio ->
-                                    syncGenreHighlightsForFileBinding(uri)
-                                    if (jumpToAudioStudio) {
-                                        activeTab = SynkaTab.AUDIO_EQ
-                                    }
-                                },
-                                onPickVisualSaf = {
-                                    jumpToDisplayStudioAfterSaf = true
-                                    visualMediaPicker.launch(arrayOf("video/*", "image/*"))
-                                },
-                                onPickAudioSaf = {
-                                    audioMediaPicker.launch(arrayOf("audio/*"))
-                                }
+                            SynkaMediaPlayerScreen(
+                                displayEqState = displayEqState,
+                                modifier = Modifier.fillMaxSize()
                             )
                         }
                     }
@@ -580,8 +564,6 @@ private fun SynkaAppShell(engine: SynkaEngine) {
         }
     }
 }
-val context = LocalContext.current
-val displayEqState by DisplayEqEngine.getInstance(context).state.collectAsState()
 
 @Composable
 private fun PersistentMiniPlayerBar(
