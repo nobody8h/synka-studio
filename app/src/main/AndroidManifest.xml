@@ -1,5 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
-<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
 
     <!-- Audio EQ, Waveform Visualizer, Network & Background Playback -->
     <uses-permission android:name="android.permission.INTERNET" />
@@ -10,6 +11,11 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
+    <!-- Optional Enhanced Audio Session Detection (granted once via ADB if desired) -->
+    <uses-permission
+        android:name="android.permission.DUMP"
+        tools:ignore="ProtectedPermissions" />
 
     <!-- Local Lossless Music & Video Library Access (Android 9 through Android 16) -->
     <uses-permission android:name="android.permission.READ_MEDIA_AUDIO" />
@@ -46,7 +52,26 @@
             android:multiprocess="false"
             android:permission="android.permission.INTERACT_ACROSS_USERS_FULL" />
 
-        <!-- Restored v1 Overlay & Audio Service (specialUse|mediaPlayback superset for API 34-36) -->
+        <!-- System-Wide Svara Audio EQ Service -->
+        <service
+            android:name=".SvaraGlobalService"
+            android:enabled="true"
+            android:exported="false"
+            android:foregroundServiceType="mediaPlayback" />
+
+        <!-- Optional 1-Tap Notification Access for Active Media App Tracking -->
+        <service
+            android:name=".SvaraNotificationListenerService"
+            android:enabled="true"
+            android:exported="true"
+            android:label="Synka Audio Session Detector"
+            android:permission="android.permission.BIND_NOTIFICATION_LISTENER_SERVICE">
+            <intent-filter>
+                <action android:name="android.service.notification.NotificationListenerService" />
+            </intent-filter>
+        </service>
+
+        <!-- Restored v1 Overlay Service -->
         <service
             android:name=".SynkaOverlayService"
             android:enabled="true"
