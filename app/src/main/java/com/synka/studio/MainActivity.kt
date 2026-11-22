@@ -77,6 +77,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.synka.studio.display.engine.DisplayEqEngine
+import com.synka.studio.display.ui.SynkaDisplayEqScreen
 import com.synka.studio.media.SynkaMediaPlayerScreen
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -90,6 +91,16 @@ private enum class SynkaTab {
     DISPLAY_EQ,
     AUDIO_EQ,
     LOCAL_MEDIA
+}
+
+private enum class DisplayPaneMode {
+    LIVE_3_TIER,
+    CLASSIC_ARKA
+}
+
+private enum class LocalMediaPaneMode {
+    LOSSLESS_PLAYER,
+    CLASSIC_PICKER
 }
 
 private data class PresetSheetStateModel(
@@ -217,6 +228,9 @@ private fun SynkaAppShell(engine: SynkaEngine) {
     val scope = rememberCoroutineScope()
 
     var activeTab by remember { mutableStateOf(SynkaTab.HOME) }
+    var displayPaneMode by remember { mutableStateOf(DisplayPaneMode.LIVE_3_TIER) }
+    var localMediaPaneMode by remember { mutableStateOf(LocalMediaPaneMode.LOSSLESS_PLAYER) }
+
     val drawerState = rememberDrawerState(initialValue = DrawerValue.Closed)
     var activePresetSheet by remember { mutableStateOf<PresetSheetStateModel?>(null) }
     var jumpToDisplayStudioAfterSaf by remember { mutableStateOf(false) }
@@ -276,6 +290,7 @@ private fun SynkaAppShell(engine: SynkaEngine) {
             engine.setVisualMedia(uri = uri, isVideo = isVideo)
             syncGenreHighlightsForFileBinding(uri)
             if (shouldJump) {
+                displayPaneMode = DisplayPaneMode.CLASSIC_ARKA
                 activeTab = SynkaTab.DISPLAY_EQ
             }
         }
@@ -361,6 +376,7 @@ private fun SynkaAppShell(engine: SynkaEngine) {
                 engine = engine,
                 onResetKora = {
                     engine.resetToKora()
+                    DisplayEqEngine.getInstance(context).updateState { it.copy(enabled = false) }
                     activeDisplayGenre = null
                     activeAudioGenre = null
                     scope.launch { drawerState.close() }
@@ -436,26 +452,50 @@ private fun SynkaAppShell(engine: SynkaEngine) {
                             )
                         }
                         SynkaTab.DISPLAY_EQ -> {
-                            ArkaStudio(
-                                engine = engine,
-                                activeDisplayGenre = activeDisplayGenre,
-                                isPreviewActive = !isPresetSheetShowingVisual,
-                                onEditVisualMedia = {
-                                    jumpToDisplayStudioAfterSaf = false
-                                    visualMediaPicker.launch(arrayOf("image/*", "video/*"))
-                                },
-                                onResetToKora = {
-                                    engine.resetToKora()
-                                    activeDisplayGenre = null
-                                    activeAudioGenre = null
-                                },
-                                onPresetSaved = { saved ->
-                                    saved.displayGenre?.let { genre ->
-                                        activeDisplayGenre = genre
-                                        lastUsedPresetByGenre["${PresetDomain.DISPLAY.name}:${genre.name}"] = saved.id
+                            Column(modifier = Modifier.fillMaxSize()) {
+                                StudioModeSwitcherBar(
+                                    leftLabel = "Live 3-Tier EQ",
+                                    rightLabel = "Classic Arka",
+                                    leftSelected = displayPaneMode == DisplayPaneMode.LIVE_3_TIER,
+                                    onSelectLeft = { displayPaneMode = DisplayPaneMode.LIVE_3_TIER },
+                                    onSelectRight = { displayPaneMode = DisplayPaneMode.CLASSIC_ARKA }
+                                )
+                                Box(
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .fillMaxWidth()
+                                ) {
+                                    when (displayPaneMode) {
+                                        DisplayPaneMode.LIVE_3_TIER -> {
+                                            SynkaDisplayEqScreen(
+                                                modifier = Modifier.fillMaxSize()
+                                            )
+                                        }
+                                        DisplayPaneMode.CLASSIC_ARKA -> {
+                                            ArkaStudio(
+                                                engine = engine,
+                                                activeDisplayGenre = activeDisplayGenre,
+                                                isPreviewActive = !isPresetSheetShowingVisual,
+                                                onEditVisualMedia = {
+                                                    jumpToDisplayStudioAfterSaf = false
+                                                    visualMediaPicker.launch(arrayOf("image/*", "video/*"))
+                                                },
+                                                onResetToKora = {
+                                                    engine.resetToKora()
+                                                    activeDisplayGenre = null
+                                                    activeAudioGenre = null
+                                                },
+                                                onPresetSaved = { saved ->
+                                                    saved.displayGenre?.let { genre ->
+                                                        activeDisplayGenre = genre
+                                                        lastUsedPresetByGenre["${PresetDomain.DISPLAY.name}:${genre.name}"] = saved.id
+                                                    }
+                                                }
+                                            )
+                                        }
                                     }
                                 }
-                            )
+                            }
                         }
                         SynkaTab.AUDIO_EQ -> {
                             SvaraStudio(
@@ -477,10 +517,52 @@ private fun SynkaAppShell(engine: SynkaEngine) {
                             )
                         }
                         SynkaTab.LOCAL_MEDIA -> {
-                            SynkaMediaPlayerScreen(
-                                displayEqState = displayEqState,
-                                modifier = Modifier.fillMaxSize()
-                            )
+                            Column(modifier = Modifier.fillMaxSize()) {
+                                StudioModeSwitcherBar(
+                                    leftLabel = "Lossless & Video",
+                                    rightLabel = "Classic Picker",
+                                    leftSelected = localMediaPaneMode == LocalMediaPaneMode.LOSSLESS_PLAYER,
+                                    onSelectLeft = { localMediaPaneMode = LocalMediaPaneMode.LOSSLESS_PLAYER },
+                                    onSelectRight = { localMediaPaneMode = LocalMediaPaneMode.CLASSIC_PICKER }
+                                )
+                                Box(
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .fillMaxWidth()
+                                ) {
+                                    when (localMediaPaneMode) {
+                                        LocalMediaPaneMode.LOSSLESS_PLAYER -> {
+                                            SynkaMediaPlayerScreen(
+                                                displayEqState = displayEqState,
+                                                modifier = Modifier.fillMaxSize()
+                                            )
+                                        }
+                                        LocalMediaPaneMode.CLASSIC_PICKER -> {
+                                            LocalMediaScreen(
+                                                engine = engine,
+                                                onVideoLoaded = { uri ->
+                                                    syncGenreHighlightsForFileBinding(uri)
+                                                    displayPaneMode = DisplayPaneMode.CLASSIC_ARKA
+                                                    activeTab = SynkaTab.DISPLAY_EQ
+                                                },
+                                                onAudioLoaded = { uri, jumpToAudioStudio ->
+                                                    syncGenreHighlightsForFileBinding(uri)
+                                                    if (jumpToAudioStudio) {
+                                                        activeTab = SynkaTab.AUDIO_EQ
+                                                    }
+                                                },
+                                                onPickVisualSaf = {
+                                                    jumpToDisplayStudioAfterSaf = true
+                                                    visualMediaPicker.launch(arrayOf("video/*", "image/*"))
+                                                },
+                                                onPickAudioSaf = {
+                                                    audioMediaPicker.launch(arrayOf("audio/*"))
+                                                }
+                                            )
+                                        }
+                                    }
+                                }
+                            }
                         }
                     }
                 }
@@ -543,10 +625,11 @@ private fun SynkaAppShell(engine: SynkaEngine) {
                             preset.audioGenre?.let { activeAudioGenre = it }
                         }
                         activePresetSheet = null
-                        activeTab = if (targetDomain == PresetDomain.AUDIO) {
-                            SynkaTab.AUDIO_EQ
+                        if (targetDomain == PresetDomain.AUDIO) {
+                            activeTab = SynkaTab.AUDIO_EQ
                         } else {
-                            SynkaTab.DISPLAY_EQ
+                            displayPaneMode = DisplayPaneMode.CLASSIC_ARKA
+                            activeTab = SynkaTab.DISPLAY_EQ
                         }
                     },
                     onEditVisualMedia = {
@@ -559,6 +642,75 @@ private fun SynkaAppShell(engine: SynkaEngine) {
                     onDismiss = {
                         activePresetSheet = null
                     }
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun StudioModeSwitcherBar(
+    leftLabel: String,
+    rightLabel: String,
+    leftSelected: Boolean,
+    onSelectLeft: () -> Unit,
+    onSelectRight: () -> Unit
+) {
+    val colors = LocalSynkaColors.current
+    val pillShape = RoundedCornerShape(50)
+
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(colors.background)
+            .padding(horizontal = 14.dp, vertical = 8.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(36.dp)
+                .clip(pillShape)
+                .background(colors.surface)
+                .border(1.dp, colors.hairline, pillShape),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Box(
+                modifier = Modifier
+                    .weight(1f)
+                    .fillMaxHeight()
+                    .background(if (leftSelected) colors.activeAccent else Color.Transparent)
+                    .clickable(onClick = onSelectLeft),
+                contentAlignment = Alignment.Center
+            ) {
+                Text(
+                    text = leftLabel,
+                    style = MaterialTheme.typography.labelMedium,
+                    fontWeight = if (leftSelected) FontWeight.Bold else FontWeight.Medium,
+                    color = if (leftSelected) SynkaPalette.ObsidianCharcoal else colors.primaryText,
+                    maxLines = 1
+                )
+            }
+            Box(
+                modifier = Modifier
+                    .width(1.dp)
+                    .height(18.dp)
+                    .background(colors.hairline)
+            )
+            Box(
+                modifier = Modifier
+                    .weight(1f)
+                    .fillMaxHeight()
+                    .background(if (!leftSelected) colors.activeAccent else Color.Transparent)
+                    .clickable(onClick = onSelectRight),
+                contentAlignment = Alignment.Center
+            ) {
+                Text(
+                    text = rightLabel,
+                    style = MaterialTheme.typography.labelMedium,
+                    fontWeight = if (!leftSelected) FontWeight.Bold else FontWeight.Medium,
+                    color = if (!leftSelected) SynkaPalette.ObsidianCharcoal else colors.primaryText,
+                    maxLines = 1
                 )
             }
         }
