@@ -580,6 +580,8 @@ private fun SynkaAppShell(engine: SynkaEngine) {
         }
     }
 }
+val context = LocalContext.current
+val displayEqState by DisplayEqEngine.getInstance(context).state.collectAsState()
 
 @Composable
 private fun PersistentMiniPlayerBar(
