@@ -29,6 +29,7 @@ import androidx.annotation.RequiresApi
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
+import androidx.core.app.ServiceCompat
 import androidx.core.content.ContextCompat
 import org.json.JSONObject
 import org.lsposed.hiddenapibypass.HiddenApiBypass
@@ -125,7 +126,7 @@ class SvaraGlobalService : Service() {
             instance?.postApplyAndSync()
         }
 
-        fun onNotificationSessionHint(context: Context) {
+        fun onNotificationSessionHint(@Suppress("UNUSED_PARAMETER") context: Context) {
             instance?.postDiscoverAndSync()
         }
 
@@ -235,6 +236,7 @@ class SvaraGlobalService : Service() {
     private var session0Holder: SessionEffectHolder? = null
     private var session0Failed: Boolean = false
     private val perSessionHolders = LinkedHashMap<Int, SessionEffectHolder>()
+    private var lastNotifiedSummary: String? = null
 
     @Volatile
     private var isCallOrRingtoneActive: Boolean = false
@@ -308,7 +310,6 @@ class SvaraGlobalService : Service() {
         discoverActiveSessionsIfPermitted()
         syncSession0FallbackState()
         applyCurrentSettings()
-        updateOngoingNotification()
         return START_STICKY
     }
 
@@ -325,6 +326,7 @@ class SvaraGlobalService : Service() {
         activeEngineLabel = "Idle"
         hasControlOverSession = true
         statusSummary = "Off"
+        lastNotifiedSummary = null
         super.onDestroy()
     }
 
@@ -354,15 +356,12 @@ class SvaraGlobalService : Service() {
     private fun promoteToForegroundSafely(): Boolean {
         val notification = buildNotification()
         return try {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                startForeground(
-                    NOTIFICATION_ID,
-                    notification,
-                    ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK
-                )
+            val fgsType = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK
             } else {
-                startForeground(NOTIFICATION_ID, notification)
+                0
             }
+            ServiceCompat.startForeground(this, NOTIFICATION_ID, notification, fgsType)
             true
         } catch (_: IllegalStateException) {
             statusSummary = "Foreground start restricted"
@@ -375,7 +374,7 @@ class SvaraGlobalService : Service() {
 
     private fun stopForegroundCleanly() {
         runCatching {
-            stopForeground(STOP_FOREGROUND_REMOVE)
+            ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE)
         }
     }
 
@@ -481,7 +480,7 @@ class SvaraGlobalService : Service() {
 
     @RequiresApi(Build.VERSION_CODES.P)
     private fun createSessionHolder(sessionId: Int, pkgHint: String): SessionEffectHolder? {
-        val dpAttempt = runCatching {
+        val dpAttempt = try {
             val dp = DynamicsProcessing(EFFECT_PRIORITY, sessionId, createDpConfig())
             val holder = SessionEffectHolder.DpHolder(sessionId, pkgHint, dp, dp.hasControl())
             dp.setControlStatusListener { _, controlGranted ->
@@ -495,9 +494,11 @@ class SvaraGlobalService : Service() {
                             applyCurrentSettings()
                         } else {
                             updateStatusText()
+                            updateOngoingNotificationIfChanged()
                         }
                     } else if (!controlGranted && session0Holder === holder) {
                         updateStatusText()
+                        updateOngoingNotificationIfChanged()
                     } else {
                         applyCurrentSettings()
                     }
@@ -509,20 +510,23 @@ class SvaraGlobalService : Service() {
             } else {
                 holder
             }
-        }.getOrNull()
+        } catch (_: Throwable) {
+            null
+        }
 
         if (dpAttempt != null) return dpAttempt
         return createLegacyEqHolder(sessionId, pkgHint)
     }
 
     private fun createLegacyEqHolder(sessionId: Int, pkgHint: String): SessionEffectHolder.LegacyEqHolder? {
-        return runCatching {
+        return try {
             val eq = Equalizer(EFFECT_PRIORITY, sessionId)
             val holder = SessionEffectHolder.LegacyEqHolder(sessionId, pkgHint, eq, eq.hasControl())
             eq.setControlStatusListener { _, controlGranted ->
                 mainHandler.post {
                     holder.controlGranted = controlGranted
                     updateStatusText()
+                    updateOngoingNotificationIfChanged()
                 }
             }
             if (!holder.hasControl()) {
@@ -531,7 +535,9 @@ class SvaraGlobalService : Service() {
             } else {
                 holder
             }
-        }.getOrNull()
+        } catch (_: Throwable) {
+            null
+        }
     }
 
     @RequiresApi(Build.VERSION_CODES.P)
@@ -629,7 +635,7 @@ class SvaraGlobalService : Service() {
         }
 
         updateStatusText()
-        updateOngoingNotification()
+        updateOngoingNotificationIfChanged()
     }
 
     @RequiresApi(Build.VERSION_CODES.P)
@@ -644,45 +650,51 @@ class SvaraGlobalService : Service() {
         return when (holder) {
             is SessionEffectHolder.DpHolder -> {
                 val dp = holder.dp
-                runCatching {
+                try {
                     if (!dp.hasControl()) {
                         holder.controlGranted = false
-                        return false
+                        false
+                    } else {
+                        dp.setInputGainAllChannelsTo(preAmpDb)
+                        val eqStage = DynamicsProcessing.Eq(true, true, BAND_CUTOFFS_HZ.size)
+                        for (i in BAND_CUTOFFS_HZ.indices) {
+                            eqStage.setBand(
+                                i,
+                                DynamicsProcessing.EqBand(true, BAND_CUTOFFS_HZ[i], bandGains[i])
+                            )
+                        }
+                        dp.setPreEqAllChannelsTo(eqStage)
+                        dp.setLimiterAllChannelsTo(limiter)
+                        dp.setEnabled(shouldEnable) == AudioEffect.SUCCESS
                     }
-                    dp.setInputGainAllChannelsTo(preAmpDb)
-                    for (i in BAND_CUTOFFS_HZ.indices) {
-                        dp.setPreEqBandAllChannelsTo(
-                            i,
-                            DynamicsProcessing.EqBand(true, BAND_CUTOFFS_HZ[i], bandGains[i])
-                        )
-                    }
-                    dp.setLimiterAllChannelsTo(limiter)
-                    val rc = dp.setEnabled(shouldEnable)
-                    rc == AudioEffect.SUCCESS
-                }.getOrDefault(false)
+                } catch (_: Throwable) {
+                    false
+                }
             }
             is SessionEffectHolder.LegacyEqHolder -> {
                 val eq = holder.eq
-                runCatching {
+                try {
                     if (!eq.hasControl()) {
                         holder.controlGranted = false
-                        return false
+                        false
+                    } else {
+                        val bandCount = eq.numberOfBands.toInt()
+                        val range = eq.bandLevelRange
+                        val minMb = range[0].toInt()
+                        val maxMb = range[1].toInt()
+                        for (b in 0 until bandCount) {
+                            val bandIdx = b.toShort()
+                            val centerHz = (eq.getCenterFreq(bandIdx) / 1000.0).coerceAtLeast(20.0)
+                            val totalDb = (evaluateGainAtHz(stages, centerHz) + preAmpDb)
+                                .coerceIn(-15f, 15f)
+                            val targetMb = (totalDb * 100f).roundToInt().coerceIn(minMb, maxMb).toShort()
+                            eq.setBandLevel(bandIdx, targetMb)
+                        }
+                        eq.setEnabled(shouldEnable) == AudioEffect.SUCCESS
                     }
-                    val bandCount = eq.numberOfBands.toInt()
-                    val range = eq.bandLevelRange
-                    val minMb = range[0].toInt()
-                    val maxMb = range[1].toInt()
-                    for (b in 0 until bandCount) {
-                        val bandIdx = b.toShort()
-                        val centerHz = (eq.getCenterFreq(bandIdx) / 1000.0).coerceAtLeast(20.0)
-                        val totalDb = (evaluateGainAtHz(stages, centerHz) + preAmpDb)
-                            .coerceIn(-15f, 15f)
-                        val targetMb = (totalDb * 100f).roundToInt().coerceIn(minMb, maxMb).toShort()
-                        eq.setBandLevel(bandIdx, targetMb)
-                    }
-                    val rc = eq.setEnabled(shouldEnable)
-                    rc == AudioEffect.SUCCESS
-                }.getOrDefault(false)
+                } catch (_: Throwable) {
+                    false
+                }
             }
         }
     }
@@ -855,8 +867,11 @@ class SvaraGlobalService : Service() {
         }
     }
 
-    private fun updateOngoingNotification() {
+    private fun updateOngoingNotificationIfChanged() {
         if (!isRunning) return
+        val current = statusSummary
+        if (current == lastNotifiedSummary) return
+        lastNotifiedSummary = current
         val nm = getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager ?: return
         runCatching { nm.notify(NOTIFICATION_ID, buildNotification()) }
     }
