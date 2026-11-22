@@ -9,7 +9,7 @@ android {
 
     defaultConfig {
         applicationId = "com.synka.studio"
-        minSdk = 26
+        minSdk = 28
         targetSdk = 36
         versionCode = 1
         versionName = "1.0"
@@ -67,8 +67,6 @@ dependencies {
     implementation("androidx.media3:media3-session:$media3Version")
     implementation("androidx.media3:media3-ui-compose:$media3Version")
     implementation("androidx.media3:media3-common:$media3Version")
-
-    // Keep any extra v1 dependencies your existing files import right here.
 
     debugImplementation("androidx.compose.ui:ui-tooling")
 }
