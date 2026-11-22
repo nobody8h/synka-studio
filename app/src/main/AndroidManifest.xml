@@ -11,7 +11,7 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
-    <!-- Local Lossless Music & Video Library Access (Android 8 through Android 16) -->
+    <!-- Local Lossless Music & Video Library Access (Android 9 through Android 16) -->
     <uses-permission android:name="android.permission.READ_MEDIA_AUDIO" />
     <uses-permission android:name="android.permission.READ_MEDIA_VIDEO" />
     <uses-permission android:name="android.permission.READ_MEDIA_VISUAL_USER_SELECTED" />
@@ -46,15 +46,15 @@
             android:multiprocess="false"
             android:permission="android.permission.INTERACT_ACROSS_USERS_FULL" />
 
-        <!-- Restored v1 Overlay Service (referenced by MainActivity.kt & Classic Arka) -->
+        <!-- Restored v1 Overlay & Audio Service (specialUse|mediaPlayback superset for API 34-36) -->
         <service
             android:name=".SynkaOverlayService"
             android:enabled="true"
             android:exported="false"
-            android:foregroundServiceType="specialUse">
+            android:foregroundServiceType="specialUse|mediaPlayback">
             <property
                 android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
-                android:value="User-activated Synka Studio display overlay filter service." />
+                android:value="User-activated Synka Studio display overlay and system-wide audio EQ service." />
         </service>
 
         <!-- New 3-Tier Display EQ Foreground Service (Android 14-16 specialUse compliant) -->
