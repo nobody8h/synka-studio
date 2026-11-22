@@ -1,22 +1,29 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
-    <!-- Existing Synka Studio Audio Permission (keep any media/storage permissions from v1) -->
+    <!-- Audio EQ & Background Media Playback -->
     <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
-
-    <!-- Step 1: Display EQ Permissions -->
-    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
+    <!-- Local Lossless Music & Video Library Access -->
+    <uses-permission android:name="android.permission.READ_MEDIA_AUDIO" />
+    <uses-permission android:name="android.permission.READ_MEDIA_VIDEO" />
+    <uses-permission
+        android:name="android.permission.READ_EXTERNAL_STORAGE"
+        android:maxSdkVersion="32" />
+
+    <!-- Display EQ System Overlay -->
+    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
 
     <application
         android:allowBackup="true"
         android:label="@string/app_name"
         android:supportsRtl="true"
         android:theme="@android:style/Theme.Material.NoActionBar">
-
-        <!-- Preserve your existing android:icon / android:roundIcon / android:theme attributes if present -->
 
         <activity
             android:name=".MainActivity"
@@ -27,7 +34,7 @@
             </intent-filter>
         </activity>
 
-        <!-- Step 1: Shizuku IPC Provider -->
+        <!-- Shizuku IPC Provider -->
         <provider
             android:name="rikka.shizuku.ShizukuProvider"
             android:authorities="${applicationId}.shizuku"
@@ -36,7 +43,7 @@
             android:multiprocess="false"
             android:permission="android.permission.INTERACT_ACROSS_USERS_FULL" />
 
-        <!-- Step 1: Display EQ Foreground Service (Android 14-16 specialUse compliant) -->
+        <!-- Display EQ Foreground Service (Android 14-16 specialUse compliant) -->
         <service
             android:name=".display.service.DisplayEqForegroundService"
             android:enabled="true"
@@ -47,7 +54,7 @@
                 android:value="User-activated system-wide display dimmer and visual comfort color filter overlay." />
         </service>
 
-        <!-- Step 1: Optional Trusted Accessibility Overlay (fixed exported="true"; reads zero content) -->
+        <!-- Optional Trusted Accessibility Overlay (reads zero screen content) -->
         <service
             android:name=".display.service.DisplayOverlayAccessibilityService"
             android:enabled="true"
@@ -60,6 +67,17 @@
             <meta-data
                 android:name="android.accessibilityservice"
                 android:resource="@xml/synka_display_a11y_config" />
+        </service>
+
+        <!-- Synka Lossless Audio + Video Media3 Session Service -->
+        <service
+            android:name=".media.SynkaPlaybackService"
+            android:enabled="true"
+            android:exported="true"
+            android:foregroundServiceType="mediaPlayback">
+            <intent-filter>
+                <action android:name="androidx.media3.session.MediaSessionService" />
+            </intent-filter>
         </service>
 
     </application>
