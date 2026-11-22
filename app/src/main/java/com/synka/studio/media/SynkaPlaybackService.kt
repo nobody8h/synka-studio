@@ -1,6 +1,8 @@
 package com.synka.studio.media
 
 import android.content.Intent
+import android.os.Handler
+import android.os.Looper
 import androidx.annotation.OptIn
 import androidx.media3.common.AudioAttributes
 import androidx.media3.common.C
@@ -18,6 +20,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import java.lang.ref.WeakReference
+import java.util.Locale
 
 @OptIn(UnstableApi::class)
 class SynkaPlaybackService : MediaSessionService() {
@@ -48,27 +51,37 @@ class SynkaPlaybackService : MediaSessionService() {
         }
     }
 
+    private val mainHandler = Handler(Looper.getMainLooper())
     private var mediaSession: MediaSession? = null
     private var exoPlayer: ExoPlayer? = null
     private var currentFloatOutputEnabled: Boolean = true
+    private var isRebuildingPlayer: Boolean = false
     private lateinit var audioRouter: LosslessAudioRouter
 
     private val playerListener = object : Player.Listener {
         override fun onTracksChanged(tracks: Tracks) {
-            val videoPresent = tracks.groups.any { it.type == C.TRACK_TYPE_VIDEO && it.isSelected }
-            _hasVideoTrack.value = videoPresent
+            _hasVideoTrack.value = tracks.groups.any { group ->
+                group.type == C.TRACK_TYPE_VIDEO && group.length > 0
+            }
             applyRoutingForCurrentTrack(allowSinkRebuild = true)
         }
 
         override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
+            val tracks = exoPlayer?.currentTracks
+            _hasVideoTrack.value = tracks?.groups?.any { group ->
+                group.type == C.TRACK_TYPE_VIDEO && group.length > 0
+            } ?: false
             applyRoutingForCurrentTrack(allowSinkRebuild = true)
         }
 
         override fun onPlaybackStateChanged(playbackState: Int) {
-            if (playbackState == Player.STATE_READY) {
-                applyRoutingForCurrentTrack(allowSinkRebuild = false)
-            } else if (playbackState == Player.STATE_IDLE || playbackState == Player.STATE_ENDED) {
-                audioRouter.clearBitPerfectRoute()
+            when (playbackState) {
+                Player.STATE_READY -> applyRoutingForCurrentTrack(allowSinkRebuild = false)
+                Player.STATE_IDLE -> {
+                    _hasVideoTrack.value = false
+                    audioRouter.clearBitPerfectRoute()
+                }
+                Player.STATE_ENDED -> audioRouter.clearBitPerfectRoute()
             }
         }
 
@@ -78,6 +91,7 @@ class SynkaPlaybackService : MediaSessionService() {
 
         override fun onVideoSizeChanged(videoSize: VideoSize) {
             if (videoSize.width > 0 && videoSize.height > 0) {
+                _hasVideoTrack.value = true
                 _videoAspectRatio.value =
                     (videoSize.width * videoSize.pixelWidthHeightRatio) / videoSize.height.toFloat()
             }
@@ -112,6 +126,7 @@ class SynkaPlaybackService : MediaSessionService() {
     }
 
     override fun onDestroy() {
+        mainHandler.removeCallbacksAndMessages(null)
         serviceRef = null
         audioRouter.stopMonitoring()
         _activePlayer.value = null
@@ -129,9 +144,6 @@ class SynkaPlaybackService : MediaSessionService() {
     private fun buildExoPlayer(enableFloatOutput: Boolean): ExoPlayer {
         currentFloatOutputEnabled = enableFloatOutput
 
-        // To enable GPL-3.0 NextLib FFmpeg decoders (ALAC/AC3/DTS/TrueHD), replace
-        // DefaultRenderersFactory(this) with NextRenderersFactory(this) and set
-        // EXTENSION_RENDERER_MODE_PREFER.
         val renderersFactory = DefaultRenderersFactory(this)
             .setEnableDecoderFallback(true)
             .setEnableAudioFloatOutput(enableFloatOutput)
@@ -149,9 +161,24 @@ class SynkaPlaybackService : MediaSessionService() {
             .also { it.addListener(playerListener) }
     }
 
+    private fun extractAudioFormat(player: ExoPlayer?): Format? {
+        if (player == null) return null
+        player.audioFormat?.let { return it }
+        var fallback: Format? = null
+        for (group in player.currentTracks.groups) {
+            if (group.type != C.TRACK_TYPE_AUDIO) continue
+            for (i in 0 until group.length) {
+                val fmt = group.getTrackFormat(i)
+                if (group.isTrackSelected(i)) return fmt
+                if (fallback == null) fallback = fmt
+            }
+        }
+        return fallback
+    }
+
     private fun applyRoutingForCurrentTrack(allowSinkRebuild: Boolean) {
         val player = exoPlayer ?: return
-        val fmt = player.audioFormat
+        val fmt = extractAudioFormat(player)
         val sampleRate = fmt?.sampleRate?.takeIf { it != Format.NO_VALUE } ?: 0
         val channels = fmt?.channelCount?.takeIf { it != Format.NO_VALUE } ?: 2
         val is16Bit = fmt?.pcmEncoding == C.ENCODING_PCM_16BIT ||
@@ -164,8 +191,20 @@ class SynkaPlaybackService : MediaSessionService() {
             trackIs16BitSource = is16Bit
         )
 
-        if (allowSinkRebuild && decision.shouldUseFloatOutput != currentFloatOutputEnabled) {
-            rebuildPlayerPreservingQueue(decision.shouldUseFloatOutput)
+        if (allowSinkRebuild && !isRebuildingPlayer &&
+            decision.shouldUseFloatOutput != currentFloatOutputEnabled
+        ) {
+            isRebuildingPlayer = true
+            val targetFloat = decision.shouldUseFloatOutput
+            mainHandler.post {
+                try {
+                    if (serviceRef?.get() != null) {
+                        rebuildPlayerPreservingQueue(targetFloat)
+                    }
+                } finally {
+                    isRebuildingPlayer = false
+                }
+            }
         }
 
         publishTelemetry(exoPlayer, decision)
@@ -173,10 +212,11 @@ class SynkaPlaybackService : MediaSessionService() {
 
     private fun refreshTelemetryOnly() {
         val player = exoPlayer ?: return
-        val fmt = player.audioFormat
+        val fmt = extractAudioFormat(player)
         val sampleRate = fmt?.sampleRate?.takeIf { it != Format.NO_VALUE } ?: 0
         val channels = fmt?.channelCount?.takeIf { it != Format.NO_VALUE } ?: 2
-        val is16Bit = fmt?.pcmEncoding == C.ENCODING_PCM_16BIT
+        val is16Bit = fmt?.pcmEncoding == C.ENCODING_PCM_16BIT ||
+            fmt?.pcmEncoding == C.ENCODING_PCM_16BIT_BIG_ENDIAN
         val decision = audioRouter.configureRoute(
             requestedMode = _outputMode.value,
             trackSampleRateHz = sampleRate,
@@ -209,7 +249,7 @@ class SynkaPlaybackService : MediaSessionService() {
     }
 
     private fun publishTelemetry(player: ExoPlayer?, decision: UsbRouteDecision) {
-        val fmt = player?.audioFormat
+        val fmt = extractAudioFormat(player)
         val mime = fmt?.sampleMimeType.orEmpty()
         val codec = when {
             mime.contains("flac", ignoreCase = true) -> "FLAC"
@@ -219,7 +259,7 @@ class SynkaPlaybackService : MediaSessionService() {
             mime.contains("vorbis", ignoreCase = true) -> "VORBIS"
             mime.contains("mpeg", ignoreCase = true) -> "MP3"
             mime.contains("mp4a", ignoreCase = true) -> "AAC"
-            mime.isNotBlank() -> mime.substringAfter('/').uppercase()
+            mime.isNotBlank() -> mime.substringAfter('/').uppercase(Locale.US)
             else -> "Idle"
         }
 
