@@ -1,4 +1,9 @@
 package com.synka.studio
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
+import androidx.compose.ui.platform.LocalContext
+import com.synka.studio.display.engine.DisplayEqEngine
+import com.synka.studio.media.SynkaMediaPlayerScreen
 
 import android.content.ClipData
 import android.content.ClipboardManager
