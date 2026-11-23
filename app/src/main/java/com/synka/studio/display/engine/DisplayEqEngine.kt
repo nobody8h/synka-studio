@@ -55,7 +55,11 @@ class DisplayEqEngine private constructor(private val appContext: Context) {
         engineScope.launch {
             applyTrigger.collect { tick ->
                 if (tick != 0L) {
-                    applyCurrentStateInternal(_state.value)
+                    try {
+                        applyCurrentStateInternal(_state.value)
+                    } catch (t: Throwable) {
+                        Log.e(TAG, "Display EQ apply cycle failed safely", t)
+                    }
                 }
             }
         }
@@ -76,6 +80,7 @@ class DisplayEqEngine private constructor(private val appContext: Context) {
     }
 
     fun reapplyNow() {
+        syncServiceLifecycle(_state.value)
         applyTrigger.value = System.nanoTime()
     }
 
@@ -118,8 +123,8 @@ class DisplayEqEngine private constructor(private val appContext: Context) {
 
     private fun applyCurrentStateInternal(state: DisplayEqState) {
         if (!state.enabled || state.isNeutral()) {
-            hardwareBackend.restoreHardware()
-            overlayController.detach()
+            runCatching { hardwareBackend.restoreHardware() }
+            runCatching { overlayController.detach() }
             _activeTier.value = DisplayEqTier.INACTIVE
             return
         }
