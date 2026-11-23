@@ -1,124 +1,56 @@
-<?xml version="1.0" encoding="utf-8"?>
-<manifest xmlns:android="http://schemas.android.com/apk/res/android"
-    xmlns:tools="http://schemas.android.com/tools">
+name: Build Synka Debug APK
 
-    <!-- Audio EQ, Waveform Visualizer, Network & Background Playback -->
-    <uses-permission android:name="android.permission.INTERNET" />
-    <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
-    <uses-permission android:name="android.permission.RECORD_AUDIO" />
-    <uses-permission android:name="android.permission.WAKE_LOCK" />
-    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
-    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
-    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
-    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+on:
+  push:
+    branches:
+      - main
+  release:
+    types:
+      - published
+  workflow_dispatch:
 
-    <!-- Optional Enhanced Audio Session Detection (granted once via ADB if desired) -->
-    <uses-permission
-        android:name="android.permission.DUMP"
-        tools:ignore="ProtectedPermissions" />
+permissions:
+  contents: write
 
-    <!-- Local Lossless Music & Video Library Access (Android 9 through Android 16) -->
-    <uses-permission android:name="android.permission.READ_MEDIA_AUDIO" />
-    <uses-permission android:name="android.permission.READ_MEDIA_VIDEO" />
-    <uses-permission android:name="android.permission.READ_MEDIA_VISUAL_USER_SELECTED" />
-    <uses-permission
-        android:name="android.permission.READ_EXTERNAL_STORAGE"
-        android:maxSdkVersion="32" />
+jobs:
+  build:
+    runs-on: ubuntu-latest
 
-    <!-- Display EQ System Overlay -->
-    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
 
-    <application
-        android:allowBackup="true"
-        android:label="@string/app_name"
-        android:supportsRtl="true"
-        android:theme="@android:style/Theme.Material.NoActionBar">
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
 
-        <activity
-            android:name=".MainActivity"
-            android:exported="true">
-            <intent-filter>
-                <action android:name="android.intent.action.MAIN" />
-                <category android:name="android.intent.category.LAUNCHER" />
-            </intent-filter>
-        </activity>
+      - name: Install Android SDK 36
+        run: |
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses |
 
-        <!-- Shizuku IPC Provider (Tier 2 Hardware Escalation) -->
-        <provider
-            android:name="rikka.shizuku.ShizukuProvider"
-            android:authorities="${applicationId}.shizuku"
-            android:enabled="true"
-            android:exported="true"
-            android:multiprocess="false"
-            android:permission="android.permission.INTERACT_ACROSS_USERS_FULL" />
+| true
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-36" "build-tools;36.0.0" "platform-tools"
 
-        <!-- System-Wide Svara Audio EQ Service -->
-        <service
-            android:name=".SvaraGlobalService"
-            android:enabled="true"
-            android:exported="false"
-            android:foregroundServiceType="mediaPlayback" />
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v6
+        with:
+          gradle-version: '9.5.0'
 
-        <!-- Optional 1-Tap Notification Access for Active Media App Tracking -->
-        <service
-            android:name=".SvaraNotificationListenerService"
-            android:enabled="true"
-            android:exported="true"
-            android:label="Synka Audio Session Detector"
-            android:permission="android.permission.BIND_NOTIFICATION_LISTENER_SERVICE">
-            <intent-filter>
-                <action android:name="android.service.notification.NotificationListenerService" />
-            </intent-filter>
-        </service>
+      - name: Build Debug APK
+        run: gradle assembleDebug --no-daemon --stacktrace
 
-        <!-- Restored v1 Overlay Service -->
-        <service
-            android:name=".SynkaOverlayService"
-            android:enabled="true"
-            android:exported="false"
-            android:foregroundServiceType="specialUse|mediaPlayback">
-            <property
-                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
-                android:value="User-activated Synka Studio display overlay and system-wide audio EQ service." />
-        </service>
+      - name: Upload Debug APK Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: synka-debug-apk
+          path: app/build/outputs/apk/debug/app-debug.apk
+          retention-days: 14
 
-        <!-- New 3-Tier Display EQ Foreground Service (Android 14-16 specialUse compliant) -->
-        <service
-            android:name=".display.service.DisplayEqForegroundService"
-            android:enabled="true"
-            android:exported="false"
-            android:foregroundServiceType="specialUse">
-            <property
-                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
-                android:value="User-activated system-wide display dimmer and visual comfort color filter overlay." />
-        </service>
-
-        <!-- Optional Trusted Accessibility Overlay (reads zero screen content) -->
-        <service
-            android:name=".display.service.DisplayOverlayAccessibilityService"
-            android:enabled="true"
-            android:exported="true"
-            android:label="@string/synka_display_a11y_label"
-            android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
-            <intent-filter>
-                <action android:name="android.accessibilityservice.AccessibilityService" />
-            </intent-filter>
-            <meta-data
-                android:name="android.accessibilityservice"
-                android:resource="@xml/synka_display_a11y_config" />
-        </service>
-
-        <!-- Synka Lossless Audio + Video Media3 Session Service -->
-        <service
-            android:name=".media.SynkaPlaybackService"
-            android:enabled="true"
-            android:exported="true"
-            android:foregroundServiceType="mediaPlayback">
-            <intent-filter>
-                <action android:name="androidx.media3.session.MediaSessionService" />
-            </intent-filter>
-        </service>
-
-    </application>
-
-</manifest>
+      - name: Attach APK to GitHub Release
+        if: github.event_name == 'release'
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: ${{ github.event.release.tag_name }}
+          files: app/build/outputs/apk/debug/app-debug.apk
