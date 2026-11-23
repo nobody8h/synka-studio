@@ -3,7 +3,7 @@ name: Build Synka Debug APK
 on:
   push:
     branches: [ "main" ]
-  release:
+  relea[span_2](start_span)[span_2](end_span)[span_5](start_span)[span_5](end_span)se:
     types: [ published ]
   workflow_dispatch:
 
